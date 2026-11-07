@@ -21,7 +21,7 @@ jobs:
         run: |
           mkdir -p AppDir/usr/bin AppDir/usr/share/applications AppDir/usr/share/icons/hicolor/256x256/apps
           cp target/release/kickterino AppDir/usr/bin/
-          cat > AppDir/usr/share/applications/kickterino.desktop <<'EOF'
+          cat > AppDir/kickterino.desktop <<'EOF'
           [Desktop Entry]
           Name=kickterino
           Exec=kickterino
@@ -29,6 +29,9 @@ jobs:
           Type=Application
           Categories=Network;Chat;
           EOF
+          cp AppDir/kickterino.desktop AppDir/usr/share/applications/
+          ln -s usr/bin/kickterino AppDir/AppRun
+          cp assets/icon.svg AppDir/kickterino.svg
           cp assets/icon.svg AppDir/usr/share/icons/hicolor/256x256/apps/kickterino.svg
           wget -q https://github.com/AppImage/AppImageKit/releases/download/continuous/appimagetool-x86_64.AppImage
           chmod +x appimagetool-x86_64.AppImage
