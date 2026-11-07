@@ -13,7 +13,8 @@ Enter a Kick channel slug (e.g. `xqc`) and press **Connect** to watch live chat.
 
 ## Notes
 
-- Uses Kick's unofficial Pusher WebSocket via `kick-api` for live chat.
+- Uses Kick's realtime WebSocket (Centrifugo protocol) for live chat.
+- Requires `curl` on `PATH`; it is used to query Kick's public API for channel and realtime credentials.
 - Sending messages is supported by pasting a Kick OAuth access token with `chat:write` scope into the **Access token** field.
 
 ## Connecting your Kick account

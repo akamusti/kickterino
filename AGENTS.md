@@ -6,7 +6,7 @@
 
 - Language: Rust (edition 2024)
 - GUI: egui / eframe 0.37
-- Kick integration: `kick-api` 0.1.9 (unofficial Pusher WebSocket, read-only chat)
+- Kick integration: built-in realtime WebSocket client (Centrifugo protocol, read-only chat); `kick-api` 0.1.9 for sending messages
 - Build outputs: `kickterino` binary (Linux), AppImage, Windows `.exe`
 
 ## Repository layout
