@@ -21,31 +21,35 @@ jobs:
         run: |
           mkdir -p AppDir/usr/bin AppDir/usr/share/applications AppDir/usr/share/icons/hicolor/256x256/apps
           cp target/release/kickterino AppDir/usr/bin/
-          cat > AppDir/kickterino.desktop <<'EOF'
+          cat > AppDir/kickterino.desktop <<'DESKTOP'
           [Desktop Entry]
           Name=kickterino
           Exec=kickterino
           Icon=kickterino
           Type=Application
           Categories=Network;Chat;
-          EOF
+          DESKTOP
           cp AppDir/kickterino.desktop AppDir/usr/share/applications/
           ln -s usr/bin/kickterino AppDir/AppRun
           cp assets/icon.svg AppDir/kickterino.svg
           cp assets/icon.svg AppDir/usr/share/icons/hicolor/256x256/apps/kickterino.svg
           wget -q https://github.com/AppImage/AppImageKit/releases/download/continuous/appimagetool-x86_64.AppImage
           chmod +x appimagetool-x86_64.AppImage
-          ARCH=x86_64 ./appimagetool-x86_64.AppImage --appimage-extract-and-run AppDir kickterino-x86_64.AppImage
+          ARCH=x86_64 ./appimagetool-x86_64.AppImage --appimage-extract-and-run --updateinformation "gh-releases-zsync|akamusti|kickterino|latest|kickterino-*x86_64.AppImage" AppDir kickterino-x86_64.AppImage
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
           name: kickterino-linux-appimage
-          path: kickterino-*.AppImage
+          path: |
+            kickterino-*.AppImage
+            kickterino-*.AppImage.zsync
       - name: Release
         if: startsWith(github.ref, 'refs/tags/v')
         uses: softprops/action-gh-release@v2
         with:
-          files: kickterino-*.AppImage
+          files: |
+            kickterino-*.AppImage
+            kickterino-*.AppImage.zsync
 
   build-windows:
     runs-on: windows-latest
