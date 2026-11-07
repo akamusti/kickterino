@@ -3,6 +3,7 @@ use eframe::egui;
 use futures::{SinkExt, StreamExt};
 use serde::Deserialize;
 use serde_json::{Value, json};
+use std::collections::HashSet;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc::{self, Receiver, Sender};
@@ -55,6 +56,13 @@ struct KickterinoApp {
     generation: Arc<AtomicU64>,
     show_timestamps: bool,
     auto_scroll: bool,
+    show_badges: bool,
+    font_size: f32,
+    timestamp_24h: bool,
+    search_query: String,
+    search_open: bool,
+    ignored: HashSet<String>,
+    seen: HashSet<String>,
 }
 
 impl KickterinoApp {
@@ -72,6 +80,13 @@ impl KickterinoApp {
             generation: Arc::new(AtomicU64::new(0)),
             show_timestamps: true,
             auto_scroll: true,
+            show_badges: true,
+            font_size: 14.0,
+            timestamp_24h: true,
+            search_query: String::new(),
+            search_open: false,
+            ignored: HashSet::new(),
+            seen: HashSet::new(),
         }
     }
 
@@ -86,6 +101,7 @@ impl KickterinoApp {
         self.status = format!("Connecting to {}...", channel);
         self.broadcaster_user_id = None;
         self.messages.clear();
+        self.seen.clear();
         thread::spawn(move || {
             let rt = match tokio::runtime::Runtime::new() {
                 Ok(rt) => rt,
@@ -95,10 +111,20 @@ impl KickterinoApp {
                 }
             };
             rt.block_on(async move {
-                if let Err(e) = run_chat(&channel, &tx, &ctx, &generation, my_generation).await {
-                    if generation.load(Ordering::SeqCst) == my_generation {
-                        notify(&tx, &ctx, WorkerMsg::Error(format!("{:#}", e)));
+                loop {
+                    if generation.load(Ordering::SeqCst) != my_generation {
+                        break;
                     }
+                    if let Err(e) = run_chat(&channel, &tx, &ctx, &generation, my_generation).await {
+                        if generation.load(Ordering::SeqCst) == my_generation {
+                            notify(&tx, &ctx, WorkerMsg::Error(format!("{:#}", e)));
+                        }
+                    }
+                    if generation.load(Ordering::SeqCst) != my_generation {
+                        break;
+                    }
+                    notify(&tx, &ctx, WorkerMsg::Status("Reconnecting in 3s...".to_string()));
+                    tokio::time::sleep(Duration::from_secs(3)).await;
                 }
             });
         });
@@ -157,6 +183,15 @@ impl eframe::App for KickterinoApp {
                     self.broadcaster_user_id = Some(broadcaster_user_id);
                 }
                 WorkerMsg::Message(msg) => {
+                    if let Some(id) = &msg.id {
+                        if !self.seen.insert(id.clone()) {
+                            // duplicate (history + live)
+                            continue;
+                        }
+                    }
+                    if !msg.is_system && self.ignored.contains(&msg.user.to_lowercase()) {
+                        continue;
+                    }
                     self.messages.push(msg);
                     if self.messages.len() > MAX_MESSAGES {
                         let drain = self.messages.len() - MAX_MESSAGES;
@@ -187,6 +222,15 @@ impl eframe::App for KickterinoApp {
     }
 
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
+        // keyboard shortcuts
+        if ui.input(|i| i.modifiers.ctrl && i.key_pressed(egui::Key::L)) {
+            self.messages.clear();
+            self.seen.clear();
+        }
+        if ui.input(|i| i.modifiers.ctrl && i.key_pressed(egui::Key::F)) {
+            self.search_open = true;
+        }
+
         egui::Panel::top("top").show(ui, |ui| {
             ui.horizontal(|ui| {
                 ui.label("Channel:");
@@ -196,13 +240,37 @@ impl eframe::App for KickterinoApp {
                 }
                 if ui.button("Clear").clicked() {
                     self.messages.clear();
+                    self.seen.clear();
                 }
-                ui.checkbox(&mut self.show_timestamps, "Timestamps");
+                if ui.button("Search").clicked() {
+                    self.search_open = !self.search_open;
+                }
+                ui.checkbox(&mut self.show_timestamps, "TS");
+                ui.checkbox(&mut self.show_badges, "Badges");
+                ui.checkbox(&mut self.auto_scroll, "Auto-scroll");
+                if ui.button("Jump bottom").clicked() {
+                    self.auto_scroll = true;
+                }
                 ui.label(&self.status);
             });
             ui.horizontal(|ui| {
                 ui.label("Access token:");
                 ui.text_edit_singleline(&mut self.token);
+            });
+            if self.search_open {
+                ui.horizontal(|ui| {
+                    ui.label("Search:");
+                    ui.text_edit_singleline(&mut self.search_query);
+                    if ui.button("x").clicked() {
+                        self.search_query.clear();
+                        self.search_open = false;
+                    }
+                });
+            }
+            ui.horizontal(|ui| {
+                ui.label("Font:");
+                ui.add(egui::Slider::new(&mut self.font_size, 10.0..=22.0));
+                ui.checkbox(&mut self.timestamp_24h, "24h time");
             });
         });
 
@@ -217,11 +285,22 @@ impl eframe::App for KickterinoApp {
             });
         });
 
+        // apply font size
+        ui.style_mut().text_styles.get_mut(&egui::TextStyle::Body).unwrap().size = self.font_size;
+
         egui::CentralPanel::default().show(ui, |ui| {
             egui::ScrollArea::vertical()
                 .stick_to_bottom(self.auto_scroll)
                 .show(ui, |ui| {
+                    let query = self.search_query.to_lowercase();
                     for m in &self.messages {
+                        // search filter
+                        if !query.is_empty() {
+                            let hay = format!("{} {}", m.user, m.text).to_lowercase();
+                            if !hay.contains(&query) {
+                                continue;
+                            }
+                        }
                         if m.is_system {
                             ui.label(
                                 egui::RichText::new(&m.text)
@@ -230,23 +309,31 @@ impl eframe::App for KickterinoApp {
                             );
                             continue;
                         }
-                        ui.horizontal_wrapped(|ui| {
+                        let is_mention = m.text.contains('@');
+                        let row = ui.horizontal_wrapped(|ui| {
                             if self.show_timestamps {
                                 if let Some(ts) = &m.created_at {
+                                    let t = if self.timestamp_24h {
+                                        ts.clone()
+                                    } else {
+                                        to_12h(ts)
+                                    };
                                     ui.label(
-                                        egui::RichText::new(ts)
+                                        egui::RichText::new(t)
                                             .small()
                                             .color(egui::Color32::from_gray(120)),
                                     );
                                 }
                             }
-                            for b in &m.badges {
-                                let color = badge_color(&b.kind);
-                                ui.label(
-                                    egui::RichText::new(format!("[{}]", b.text))
-                                        .small()
-                                        .color(color),
-                                );
+                            if self.show_badges {
+                                for b in &m.badges {
+                                    let color = badge_color(&b.kind);
+                                    ui.label(
+                                        egui::RichText::new(format!("[{}]", b.text))
+                                            .small()
+                                            .color(color),
+                                    );
+                                }
                             }
                             let name_color = m
                                 .color
@@ -261,6 +348,11 @@ impl eframe::App for KickterinoApp {
                             ui.label(
                                 egui::RichText::new(":").color(egui::Color32::from_gray(120)),
                             );
+                            let text_color = if is_mention {
+                                egui::Color32::from_rgb(255, 230, 120)
+                            } else {
+                                egui::Color32::PLACEHOLDER
+                            };
                             for (is_emote, seg) in split_content(&m.text) {
                                 if is_emote {
                                     ui.label(
@@ -268,15 +360,48 @@ impl eframe::App for KickterinoApp {
                                             .italics()
                                             .color(egui::Color32::from_rgb(255, 220, 120)),
                                     );
+                                } else if is_mention {
+                                    ui.label(egui::RichText::new(seg).color(text_color));
                                 } else {
                                     ui.label(seg);
                                 }
+                            }
+                        });
+                        let msg = m.clone();
+                        row.response.context_menu(|ui| {
+                            if ui.button("Copy message").clicked() {
+                                ui.ctx().copy_text(msg.text.clone());
+                            }
+                            if ui.button("Copy username").clicked() {
+                                ui.ctx().copy_text(msg.user.clone());
+                            }
+                            if ui.button("Ignore user").clicked() {
+                                self.ignored.insert(msg.user.to_lowercase());
                             }
                         });
                     }
                 });
         });
     }
+}
+
+fn to_12h(ts: &str) -> String {
+    // "HH:MM:SS" -> "h:MM:SS AM/PM"
+    if ts.len() < 8 {
+        return ts.to_string();
+    }
+    let h: u32 = ts[0..2].parse().unwrap_or(0);
+    let rest = &ts[2..];
+    let (h12, suffix) = if h == 0 {
+        (12, "AM")
+    } else if h < 12 {
+        (h, "AM")
+    } else if h == 12 {
+        (12, "PM")
+    } else {
+        (h - 12, "PM")
+    };
+    format!("{}{} {}", h12, rest, suffix)
 }
 
 fn notify(tx: &Sender<WorkerMsg>, ctx: &egui::Context, msg: WorkerMsg) {
@@ -303,7 +428,8 @@ fn badge_color(kind: &str) -> egui::Color32 {
         "vip" => egui::Color32::from_rgb(255, 100, 200),
         "broadcaster" | "owner" | "streamer" => egui::Color32::from_rgb(255, 60, 60),
         "sub_gifter" | "gifter" => egui::Color32::from_rgb(255, 165, 0),
-        "verified" | "partner" => egui::Color32::from_rgb(0, 180, 255),
+        "verified" | "partner" | "goldenk" => egui::Color32::from_rgb(0, 180, 255),
+        "level" => egui::Color32::from_rgb(255, 200, 80),
         _ => egui::Color32::from_gray(150),
     }
 }
@@ -315,10 +441,21 @@ fn parse_badges(v: &Value) -> Vec<Badge> {
             if let Some(s) = b.as_str() {
                 out.push(Badge { text: s.to_string(), kind: s.to_lowercase() });
             } else if let Some(obj) = b.as_object() {
-                let text = obj.get("text").and_then(|x| x.as_str()).unwrap_or("").to_string();
-                let kind = obj.get("type").and_then(|x| x.as_str()).unwrap_or("").to_string();
+                let text = obj
+                    .get("text")
+                    .or_else(|| obj.get("label"))
+                    .and_then(|x| x.as_str())
+                    .unwrap_or("")
+                    .to_string();
+                let kind = obj
+                    .get("type")
+                    .and_then(|x| x.as_str())
+                    .unwrap_or("")
+                    .to_string();
                 if !text.is_empty() {
                     out.push(Badge { text, kind });
+                } else if !kind.is_empty() {
+                    out.push(Badge { text: kind.clone(), kind });
                 }
             }
         }
@@ -357,6 +494,79 @@ fn short_time(created_at: &str) -> Option<String> {
     } else {
         None
     }
+}
+
+fn parse_history_msg(m: &Value) -> Option<ChatMsg> {
+    let user = m["sender"]["username"].as_str().unwrap_or_default().to_string();
+    let text = m["content"]
+        .as_str()
+        .or_else(|| m["text"].as_str())
+        .unwrap_or_default()
+        .to_string();
+    if user.is_empty() || text.is_empty() {
+        return None;
+    }
+    let id = m["id"].as_str().map(|s| s.to_string());
+    let created_at = m["created_at"].as_str().map(short_time).flatten();
+    // history uses sender.color; realtime uses identity
+    let color = m["sender"]["color"]
+        .as_str()
+        .or_else(|| m["sender"]["identity"]["color"].as_str())
+        .or_else(|| m["sender"]["identity"]["username_color"].as_str())
+        .map(|s| s.to_string());
+    let badges = parse_badges(
+        m["sender"]
+            .get("badges")
+            .or_else(|| m["sender"]["identity"].get("badges"))
+            .unwrap_or(&Value::Null),
+    );
+    Some(ChatMsg {
+        id,
+        user,
+        text,
+        created_at,
+        color,
+        badges,
+        is_system: false,
+    })
+}
+
+async fn fetch_history(chatroom_id: u64) -> Vec<ChatMsg> {
+    let url = format!("https://kick.com/api/v2/channels/{}/messages", chatroom_id);
+    let mut cmd = tokio::process::Command::new("curl");
+    cmd.args([
+        "-sS",
+        "-f",
+        "-m",
+        "20",
+        "-H",
+        "Accept: application/json",
+        "-H",
+        &format!("User-Agent: {}", USER_AGENT),
+        &url,
+    ]);
+    hide_console_window(&mut cmd);
+    let output = match cmd.output().await {
+        Ok(o) => o,
+        Err(_) => return Vec::new(),
+    };
+    if !output.status.success() {
+        return Vec::new();
+    }
+    let value: Value = match serde_json::from_slice(&output.stdout) {
+        Ok(v) => v,
+        Err(_) => return Vec::new(),
+    };
+    let mut msgs: Vec<ChatMsg> = value["data"]["messages"]
+        .as_array()
+        .cloned()
+        .unwrap_or_default()
+        .iter()
+        .filter_map(parse_history_msg)
+        .collect();
+    // newest first -> chronological
+    msgs.reverse();
+    msgs
 }
 
 struct ChannelInfo {
@@ -399,23 +609,62 @@ where
 async fn fetch_channel_info(slug: &str) -> Result<ChannelInfo> {
     let url = format!("https://kick.com/api/v2/channels/{}", slug);
     let mut cmd = tokio::process::Command::new("curl");
-    cmd.args(["-sS", "-f", "-m", "20", "-H", "Accept: application/json", "-H", "User-Agent: Chatterino7", &url]);
+    cmd.args([
+        "-sS",
+        "-f",
+        "-m",
+        "20",
+        "-H",
+        "Accept: application/json",
+        "-H",
+        "User-Agent: Chatterino7",
+        &url,
+    ]);
     hide_console_window(&mut cmd);
 
     let output = cmd.output().await.context("failed to run curl (is it installed?)")?;
     if !output.status.success() {
         let err = String::from_utf8_lossy(&output.stderr);
-        bail!("Channel info failed for '{}': {}", slug, err.trim().trim_start_matches("curl: "));
+        bail!(
+            "Channel info failed for '{}': {}",
+            slug,
+            err.trim().trim_start_matches("curl: ")
+        );
     }
 
     let info: ChannelInfoResponse = serde_json::from_slice(&output.stdout)
         .with_context(|| format!("Channel info failed for '{}'", slug))?;
-    Ok(ChannelInfo { broadcaster_user_id: info.user_id, chatroom_id: info.chatroom.id })
+    Ok(ChannelInfo {
+        broadcaster_user_id: info.user_id,
+        chatroom_id: info.chatroom.id,
+    })
 }
 
 async fn post_json(url: &str, body: &Value) -> Result<Value> {
     let mut cmd = tokio::process::Command::new("curl");
-    cmd.args(["-sS", "-f", "-m", "20", "-X", "POST", url, "-H", "Content-Type: application/json", "-H", "Accept: application/json", "-H", "x-app-platform: web", "-H", "Referer: https://kick.com/", "-H", "Origin: https://kick.com", "-H", &format!("User-Agent: {}", USER_AGENT), "-d", &body.to_string()]);
+    cmd.args([
+        "-sS",
+        "-f",
+        "-m",
+        "20",
+        "-X",
+        "POST",
+        url,
+        "-H",
+        "Content-Type: application/json",
+        "-H",
+        "Accept: application/json",
+        "-H",
+        "x-app-platform: web",
+        "-H",
+        "Referer: https://kick.com/",
+        "-H",
+        "Origin: https://kick.com",
+        "-H",
+        &format!("User-Agent: {}", USER_AGENT),
+        "-d",
+        &body.to_string(),
+    ]);
     hide_console_window(&mut cmd);
 
     let output = cmd.output().await.context("failed to run curl (is it installed?)")?;
@@ -441,72 +690,154 @@ fn hide_console_window(cmd: &mut tokio::process::Command) {
 
 fn client_id() -> String {
     use std::time::{SystemTime, UNIX_EPOCH};
-    let nanos = SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_nanos()).unwrap_or_default();
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or_default();
     format!("kickterino-{:x}-{:x}", std::process::id(), nanos)
 }
 
-async fn run_chat(channel: &str, tx: &Sender<WorkerMsg>, ctx: &egui::Context, generation: &Arc<AtomicU64>, my_generation: u64) -> Result<()> {
+async fn run_chat(
+    channel: &str,
+    tx: &Sender<WorkerMsg>,
+    ctx: &egui::Context,
+    generation: &Arc<AtomicU64>,
+    my_generation: u64,
+) -> Result<()> {
     let is_current = || generation.load(Ordering::SeqCst) == my_generation;
 
     let info = fetch_channel_info(channel).await?;
     if !is_current() {
         return Ok(());
     }
-    notify(tx, ctx, WorkerMsg::Connected { broadcaster_user_id: info.broadcaster_user_id });
 
-    let client = client_id();
-    let config = post_json(REALTIME_CONFIG_URL, &json!({
-        "client": { "id": client, "type": "web" },
-        "capabilities": { "accepted_providers": [ { "provider": "pusher" }, { "provider": "centrifugo" } ] }
-    })).await.context("Realtime config failed")?;
-
-    let url = config["data"]["connections"][0]["credentials"]["url"].as_str().context("Realtime config returned no WebSocket URL")?.to_string();
-
-    let auth = post_json(REALTIME_AUTH_URL, &json!({ "client_id": client })).await.context("Realtime auth failed")?;
-    let token = auth["data"]["token"].as_str().context("Realtime auth returned no token")?.to_string();
-
-    let (mut ws, _) = tokio_tungstenite::connect_async(&url).await.context("Chat WebSocket connection failed")?;
-
-    let connect = json!({ "id": 1, "connect": { "token": token } });
-    ws.send(Message::Text(connect.to_string().into())).await.context("Chat handshake failed")?;
-
-    let reply = tokio::time::timeout(Duration::from_secs(15), ws.next()).await.context("Timed out while connecting to chat")?.context("Chat connection closed during handshake")?.context("Chat handshake failed")?;
-
-    if let Message::Text(text) = &reply {
-        let value: Value = serde_json::from_str(text.as_str()).context("Invalid chat handshake response")?;
-        if let Some(err) = value.get("error") { bail!("Chat connection rejected: {}", err); }
-        if value.get("connect").is_none() { bail!("Unexpected chat handshake response: {}", text.as_str()); }
+    // load recent history first
+    let history = fetch_history(info.chatroom_id).await;
+    for m in history {
+        if is_current() {
+            notify(tx, ctx, WorkerMsg::Message(m));
+        }
     }
 
-    let subscribe = json!({ "id": 2, "subscribe": { "channel": format!("chatrooms.{}.v2", info.chatroom_id) } });
-    ws.send(Message::Text(subscribe.to_string().into())).await.context("Chat subscription failed")?;
+    notify(
+        tx,
+        ctx,
+        WorkerMsg::Connected {
+            broadcaster_user_id: info.broadcaster_user_id,
+        },
+    );
+
+    let client = client_id();
+    let config = post_json(
+        REALTIME_CONFIG_URL,
+        &json!({
+            "client": { "id": client, "type": "web" },
+            "capabilities": {
+                "accepted_providers": [
+                    { "provider": "pusher" },
+                    { "provider": "centrifugo" }
+                ]
+            }
+        }),
+    )
+    .await
+    .context("Realtime config failed")?;
+
+    let url = config["data"]["connections"][0]["credentials"]["url"]
+        .as_str()
+        .context("Realtime config returned no WebSocket URL")?
+        .to_string();
+
+    let auth = post_json(REALTIME_AUTH_URL, &json!({ "client_id": client }))
+        .await
+        .context("Realtime auth failed")?;
+    let token = auth["data"]["token"]
+        .as_str()
+        .context("Realtime auth returned no token")?
+        .to_string();
+
+    let (mut ws, _) = tokio_tungstenite::connect_async(&url)
+        .await
+        .context("Chat WebSocket connection failed")?;
+
+    let connect = json!({ "id": 1, "connect": { "token": token } });
+    ws.send(Message::Text(connect.to_string().into()))
+        .await
+        .context("Chat handshake failed")?;
+
+    let reply = tokio::time::timeout(Duration::from_secs(15), ws.next())
+        .await
+        .context("Timed out while connecting to chat")?
+        .context("Chat connection closed during handshake")?
+        .context("Chat handshake failed")?;
+
+    if let Message::Text(text) = &reply {
+        let value: Value =
+            serde_json::from_str(text.as_str()).context("Invalid chat handshake response")?;
+        if let Some(err) = value.get("error") {
+            bail!("Chat connection rejected: {}", err);
+        }
+        if value.get("connect").is_none() {
+            bail!("Unexpected chat handshake response: {}", text.as_str());
+        }
+    }
+
+    let subscribe = json!({
+        "id": 2,
+        "subscribe": { "channel": format!("chatrooms.{}.v2", info.chatroom_id) }
+    });
+    ws.send(Message::Text(subscribe.to_string().into()))
+        .await
+        .context("Chat subscription failed")?;
 
     if is_current() {
-        notify(tx, ctx, WorkerMsg::Status(format!("Connected to {}", channel)));
+        notify(
+            tx,
+            ctx,
+            WorkerMsg::Status(format!("Connected to {}", channel)),
+        );
     }
 
     while let Some(frame) = ws.next().await {
-        if !is_current() { break; }
+        if !is_current() {
+            break;
+        }
         let frame = frame.context("Chat WebSocket error")?;
         match frame {
             Message::Text(text) => {
                 let text = text.as_str();
                 if text == "{}" {
-                    ws.send(Message::Text("{}".into())).await.context("Chat pong failed")?;
+                    ws.send(Message::Text("{}".into()))
+                        .await
+                        .context("Chat pong failed")?;
                     continue;
                 }
-                let Ok(value) = serde_json::from_str::<Value>(text) else { continue; };
-                if let Some(err) = value.get("error") { bail!("Chat error: {}", err); }
-                if let Some(push) = value.get("push") { handle_push(push, tx, ctx); }
+                let Ok(value) = serde_json::from_str::<Value>(text) else {
+                    continue;
+                };
+                if let Some(err) = value.get("error") {
+                    bail!("Chat error: {}", err);
+                }
+                if let Some(push) = value.get("push") {
+                    handle_push(push, tx, ctx);
+                }
             }
-            Message::Ping(payload) => { ws.send(Message::Pong(payload)).await.context("Chat pong failed")?; }
+            Message::Ping(payload) => {
+                ws.send(Message::Pong(payload))
+                    .await
+                    .context("Chat pong failed")?;
+            }
             Message::Close(_) => break,
             _ => {}
         }
     }
 
     if is_current() {
-        notify(tx, ctx, WorkerMsg::Status("Connection closed".to_string()));
+        notify(
+            tx,
+            ctx,
+            WorkerMsg::Status("Connection closed".to_string()),
+        );
     }
     Ok(())
 }
@@ -516,60 +847,125 @@ fn handle_push(push: &Value, tx: &Sender<WorkerMsg>, ctx: &egui::Context) {
     let event = data["event"].as_str().unwrap_or_default();
 
     let payload: Value = match &data["data"] {
-        Value::String(raw) => match serde_json::from_str(raw) { Ok(value) => value, Err(_) => return },
+        Value::String(raw) => match serde_json::from_str(raw) {
+            Ok(value) => value,
+            Err(_) => return,
+        },
         value @ Value::Object(_) => value.clone(),
         _ => return,
     };
 
     match event {
         "App\\Events\\ChatMessageEvent" => {
-            let user = payload["sender"]["username"].as_str().unwrap_or_default().to_string();
+            let user = payload["sender"]["username"]
+                .as_str()
+                .unwrap_or_default()
+                .to_string();
             let text = payload["content"].as_str().unwrap_or_default().to_string();
-            if user.is_empty() || text.is_empty() { return; }
-            let id = payload["id"].as_str().map(|s| s.to_string()).or_else(|| payload["message_id"].as_str().map(|s| s.to_string()));
+            if user.is_empty() || text.is_empty() {
+                return;
+            }
+            let id = payload["id"]
+                .as_str()
+                .map(|s| s.to_string())
+                .or_else(|| payload["message_id"].as_str().map(|s| s.to_string()));
             let created_at = payload["created_at"].as_str().map(short_time).flatten();
             let identity = &payload["sender"]["identity"];
-            let color = identity.get("color").or_else(|| identity.get("username_color")).and_then(|v| v.as_str()).map(|s| s.to_string());
-            let badges = parse_badges(identity.get("badges").or_else(|| identity.get("badges_v2")).unwrap_or(&Value::Null));
-            notify(tx, ctx, WorkerMsg::Message(ChatMsg { id, user, text, created_at, color, badges, is_system: false }));
+            let color = identity
+                .get("color")
+                .or_else(|| identity.get("username_color"))
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string());
+            let badges = parse_badges(
+                identity
+                    .get("badges")
+                    .or_else(|| identity.get("badges_v2"))
+                    .unwrap_or(&Value::Null),
+            );
+            notify(
+                tx,
+                ctx,
+                WorkerMsg::Message(ChatMsg {
+                    id,
+                    user,
+                    text,
+                    created_at,
+                    color,
+                    badges,
+                    is_system: false,
+                }),
+            );
         }
         "App\\Events\\MessageDeletedEvent" => {
-            if let Some(id) = payload["message_id"].as_str() { notify(tx, ctx, WorkerMsg::Delete(id.to_string())); }
+            if let Some(id) = payload["message_id"].as_str() {
+                notify(tx, ctx, WorkerMsg::Delete(id.to_string()));
+            }
         }
         "App\\Events\\UserBannedEvent" => {
-            let name = payload["username"].as_str().or_else(|| payload["banned_username"].as_str()).unwrap_or("someone");
+            let name = payload["username"]
+                .as_str()
+                .or_else(|| payload["banned_username"].as_str())
+                .unwrap_or("someone");
             notify(tx, ctx, WorkerMsg::System(format!("{} was banned", name)));
         }
         "App\\Events\\UserUnbannedEvent" => {
-            let name = payload["username"].as_str().or_else(|| payload["unbanned_username"].as_str()).unwrap_or("someone");
+            let name = payload["username"]
+                .as_str()
+                .or_else(|| payload["unbanned_username"].as_str())
+                .unwrap_or("someone");
             notify(tx, ctx, WorkerMsg::System(format!("{} was unbanned", name)));
         }
         "App\\Events\\SubscriptionEvent" => {
-            let name = payload["username"].as_str().or_else(|| payload["user"]["username"].as_str()).unwrap_or("someone");
+            let name = payload["username"]
+                .as_str()
+                .or_else(|| payload["user"]["username"].as_str())
+                .unwrap_or("someone");
             notify(tx, ctx, WorkerMsg::System(format!("{} subscribed", name)));
         }
         "App\\Events\\GiftedSubscriptionsEvent" => {
-            let gifter = payload["gifted_by"].as_str().or_else(|| payload["gifter"]["username"].as_str()).unwrap_or("someone");
-            let count = payload["recipients"].as_array().map(|a| a.len()).unwrap_or(0);
-            notify(tx, ctx, WorkerMsg::System(format!("{} gifted {} subs", gifter, count)));
+            let gifter = payload["gifted_by"]
+                .as_str()
+                .or_else(|| payload["gifter"]["username"].as_str())
+                .unwrap_or("someone");
+            let count = payload["recipients"]
+                .as_array()
+                .map(|a| a.len())
+                .unwrap_or(0);
+            notify(
+                tx,
+                ctx,
+                WorkerMsg::System(format!("{} gifted {} subs", gifter, count)),
+            );
         }
         "App\\Events\\PinnedMessageCreatedEvent" => {
             if let Some(msg) = payload.get("message") {
                 let user = msg["sender"]["username"].as_str().unwrap_or("someone");
                 let content = msg["content"].as_str().unwrap_or("");
-                notify(tx, ctx, WorkerMsg::System(format!("Pinned by {}: {}", user, content)));
+                notify(
+                    tx,
+                    ctx,
+                    WorkerMsg::System(format!("Pinned by {}: {}", user, content)),
+                );
             }
         }
         "App\\Events\\RewardRedeemedEvent" => {
             let user = payload["username"].as_str().unwrap_or("someone");
             let title = payload["reward_title"].as_str().unwrap_or("reward");
-            notify(tx, ctx, WorkerMsg::System(format!("{} redeemed {}", user, title)));
+            notify(
+                tx,
+                ctx,
+                WorkerMsg::System(format!("{} redeemed {}", user, title)),
+            );
         }
         "App\\Events\\KicksGiftedEvent" => {
             let sender = payload["sender"]["username"].as_str().unwrap_or("someone");
             let name = payload["gift"]["name"].as_str().unwrap_or("gift");
             let amount = payload["gift"]["amount"].as_i64().unwrap_or(1);
-            notify(tx, ctx, WorkerMsg::System(format!("{} gifted {}x {}", sender, amount, name)));
+            notify(
+                tx,
+                ctx,
+                WorkerMsg::System(format!("{} gifted {}x {}", sender, amount, name)),
+            );
         }
         _ => {}
     }
@@ -578,5 +974,9 @@ fn handle_push(push: &Value, tx: &Sender<WorkerMsg>, ctx: &egui::Context) {
 fn main() -> eframe::Result<()> {
     env_logger::init();
     let options = eframe::NativeOptions::default();
-    eframe::run_native("kickterino", options, Box::new(|cc| Ok(Box::new(KickterinoApp::new(cc)))))
+    eframe::run_native(
+        "kickterino",
+        options,
+        Box::new(|cc| Ok(Box::new(KickterinoApp::new(cc)))),
+    )
 }
