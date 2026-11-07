@@ -25,3 +25,8 @@ Enter a Kick channel slug (e.g. `xqc`) and press **Connect** to watch live chat.
 5. Type a message and press **Send**.
 
 > The app never stores your token; it is kept only in memory for the session. Token handling and refresh are your responsibility.
+
+## Acknowledgements
+
+- Inspired by [Chatterino 2](https://github.com/Chatterino/chatterino2) (MIT License).
+- Kick API access via the [`kick-api`](https://crates.io/crates/kick-api) Rust crate.
