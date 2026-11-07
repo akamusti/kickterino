@@ -10,12 +10,17 @@ struct ChatMsg {
 
 enum WorkerMsg {
     Status(String),
+    Connected {
+        broadcaster_user_id: u64,
+    },
     Message(ChatMsg),
     Error(String),
 }
 
 struct KickterinoApp {
     channel: String,
+    token: String,
+    broadcaster_user_id: Option<u64>,
     messages: Vec<ChatMsg>,
     rx: Receiver<WorkerMsg>,
     tx: Sender<WorkerMsg>,
@@ -28,6 +33,8 @@ impl KickterinoApp {
         let (tx, rx) = mpsc::channel();
         Self {
             channel: "xqc".to_string(),
+            token: String::new(),
+            broadcaster_user_id: None,
             messages: Vec::new(),
             rx,
             tx,
@@ -43,37 +50,91 @@ impl KickterinoApp {
         }
         let tx = self.tx.clone();
         self.status = format!("Connecting to {}…", channel);
+        self.broadcaster_user_id = None;
         self.messages.clear();
         thread::spawn(move || {
             let rt = tokio::runtime::Runtime::new().unwrap();
             rt.block_on(async move {
-                match kick_api::LiveChatClient::connect_by_username(&channel).await {
-                    Ok(mut client) => {
-                        let _ = tx.send(WorkerMsg::Status(format!("Connected to {}", channel)));
-                        loop {
-                            match client.next_message().await {
-                                Ok(Some(m)) => {
-                                    let msg = ChatMsg {
-                                        user: m.sender.username,
-                                        text: m.content,
-                                    };
-                                    if tx.send(WorkerMsg::Message(msg)).is_err() {
-                                        break;
+                // Fetch channel info (public) to get broadcaster user id
+                match kick_api::fetch_channel_info(&channel).await {
+                    Ok(info) => {
+                        let uid = info.user_id;
+                        let _ = tx.send(WorkerMsg::Connected {
+                            broadcaster_user_id: uid,
+                        });
+                        match kick_api::LiveChatClient::connect_by_username(&channel).await {
+                            Ok(mut client) => {
+                                let _ = tx.send(WorkerMsg::Status(format!("Connected to {}", channel)));
+                                loop {
+                                    match client.next_message().await {
+                                        Ok(Some(m)) => {
+                                            let msg = ChatMsg {
+                                                user: m.sender.username,
+                                                text: m.content,
+                                            };
+                                            if tx.send(WorkerMsg::Message(msg)).is_err() {
+                                                break;
+                                            }
+                                        }
+                                        Ok(None) => {
+                                            let _ = tx.send(WorkerMsg::Status("Connection closed".to_string()));
+                                            break;
+                                        }
+                                        Err(e) => {
+                                            let _ = tx.send(WorkerMsg::Error(format!("{}", e)));
+                                            break;
+                                        }
                                     }
                                 }
-                                Ok(None) => {
-                                    let _ = tx.send(WorkerMsg::Status("Connection closed".to_string()));
-                                    break;
-                                }
-                                Err(e) => {
-                                    let _ = tx.send(WorkerMsg::Error(format!("{}", e)));
-                                    break;
-                                }
+                            }
+                            Err(e) => {
+                                let _ = tx.send(WorkerMsg::Error(format!("Connect failed: {}", e)));
                             }
                         }
                     }
                     Err(e) => {
-                        let _ = tx.send(WorkerMsg::Error(format!("Connect failed: {}", e)));
+                        let _ = tx.send(WorkerMsg::Error(format!("Channel info failed: {}", e)));
+                    }
+                }
+            });
+        });
+    }
+
+    fn send_message(&mut self) {
+        let text = self.input.trim().to_string();
+        if text.is_empty() {
+            return;
+        }
+        let token = self.token.trim().to_string();
+        if token.is_empty() {
+            self.status = "No access token set".to_string();
+            return;
+        }
+        let uid = match self.broadcaster_user_id {
+            Some(u) => u,
+            None => {
+                self.status = "Not connected".to_string();
+                return;
+            }
+        };
+        self.input.clear();
+        let tx = self.tx.clone();
+        thread::spawn(move || {
+            let rt = tokio::runtime::Runtime::new().unwrap();
+            rt.block_on(async move {
+                let client = kick_api::KickApiClient::with_token(token);
+                let req = kick_api::SendMessageRequest {
+                    r#type: "user".to_string(),
+                    content: text,
+                    broadcaster_user_id: Some(uid),
+                    reply_to_message_id: None,
+                };
+                match client.chat().send_message(req).await {
+                    Ok(_) => {
+                        let _ = tx.send(WorkerMsg::Status("Message sent".to_string()));
+                    }
+                    Err(e) => {
+                        let _ = tx.send(WorkerMsg::Error(format!("Send failed: {}", e)));
                     }
                 }
             });
@@ -86,6 +147,11 @@ impl eframe::App for KickterinoApp {
         while let Ok(m) = self.rx.try_recv() {
             match m {
                 WorkerMsg::Status(s) => self.status = s,
+                WorkerMsg::Connected {
+                    broadcaster_user_id,
+                } => {
+                    self.broadcaster_user_id = Some(broadcaster_user_id);
+                }
                 WorkerMsg::Message(msg) => self.messages.push(msg),
                 WorkerMsg::Error(e) => self.status = e,
             }
@@ -103,13 +169,17 @@ impl eframe::App for KickterinoApp {
                 }
                 ui.label(&self.status);
             });
+            ui.horizontal(|ui| {
+                ui.label("Access token:");
+                ui.text_edit_singleline(&mut self.token);
+            });
         });
 
         egui::Panel::bottom("bottom").show(ui, |ui| {
             ui.horizontal(|ui| {
                 ui.text_edit_singleline(&mut self.input);
                 if ui.button("Send").clicked() {
-                    self.input.clear();
+                    self.send_message();
                 }
             });
         });
