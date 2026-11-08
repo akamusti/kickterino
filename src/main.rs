@@ -225,6 +225,7 @@ struct KickterinoApp {
     theme_dark: bool,
     always_on_top: bool,
     show_settings: bool,
+    show_connect: bool,
     show_side_panel: bool,
     highlight_words: String,
     split_view: bool,
@@ -271,6 +272,7 @@ impl KickterinoApp {
             theme_dark: true,
             always_on_top: false,
             show_settings: false,
+            show_connect: false,
             show_side_panel: true,
             highlight_words: String::new(),
             split_view: false,
@@ -437,6 +439,10 @@ impl eframe::App for KickterinoApp {
                     self.active = self.tabs.len() - 1;
                 }
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    let acct_label = if self.token.trim().is_empty() { "Account: guest ⚠" } else { "Account: connected ✓" };
+                    if ui.small_button(acct_label).clicked() {
+                        self.show_connect = !self.show_connect;
+                    }
                     if ui.small_button("⚙").clicked() {
                         self.show_settings = !self.show_settings;
                     }
@@ -550,6 +556,53 @@ impl eframe::App for KickterinoApp {
             );
             if !still_open {
                 self.show_settings = false;
+            }
+        }
+
+        // connect account window (native, with guidance)
+        if self.show_connect {
+            let mut still_open = true;
+            ui.ctx().show_viewport_immediate(
+                egui::ViewportId::from_hash_of("connect"),
+                egui::ViewportBuilder::default()
+                    .with_title("Connect your Kick account")
+                    .with_inner_size([460.0, 420.0])
+                    .with_resizable(true),
+                |ctx, _class| {
+                    if ctx.input(|i| i.viewport().close_requested()) {
+                        still_open = false;
+                    }
+                    egui::CentralPanel::default().show(ctx, |ui| {
+                        egui::ScrollArea::vertical().show(ui, |ui| {
+                            ui.heading("How to connect your Kick account");
+                            ui.label("Sending messages requires a Kick access token. Read-only chat works without it.");
+                            ui.separator();
+                            ui.label(egui::RichText::new("Steps:").strong());
+                            ui.label("1. Open https://kick.com in your browser and log in.");
+                            ui.label("2. Open DevTools (F12) → Application → Cookies → kick.com.");
+                            ui.label("3. Find the cookie named 'kick_session' (or your access token) and copy its value.");
+                            ui.label("4. Paste it into the field below and click Save.");
+                            ui.label("5. The top bar should show 'Account: connected ✓'.");
+                            ui.separator();
+                            ui.label("Access token:");
+                            ui.text_edit_singleline(&mut self.token);
+                            ui.horizontal(|ui| {
+                                if ui.button("Save").clicked() {
+                                    still_open = false;
+                                }
+                                if ui.button("Clear token").clicked() {
+                                    self.token.clear();
+                                }
+                            });
+                            ui.separator();
+                            ui.small("Note: Kick's API is unofficial and may change. Token is stored in memory only (not persisted).");
+                            ui.small("Sending uses kick-api; make sure your token has chat write permission.");
+                        });
+                    });
+                },
+            );
+            if !still_open {
+                self.show_connect = false;
             }
         }
 
