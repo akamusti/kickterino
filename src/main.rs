@@ -224,6 +224,11 @@ struct KickterinoApp {
     timestamp_24h: bool,
     theme_dark: bool,
     always_on_top: bool,
+    show_settings: bool,
+    show_side_panel: bool,
+    highlight_words: String,
+    split_view: bool,
+    active_right: usize,
     emote_cache: Arc<std::sync::Mutex<std::collections::HashMap<String, EmoteState>>>,
     emote_textures: std::collections::HashMap<String, egui::TextureHandle>,
     user_card: Option<UserCard>,
@@ -265,6 +270,11 @@ impl KickterinoApp {
             timestamp_24h: state.timestamp_24h || state.timestamp_24h == false && true,
             theme_dark: true,
             always_on_top: false,
+            show_settings: false,
+            show_side_panel: true,
+            highlight_words: String::new(),
+            split_view: false,
+            active_right: 0,
             emote_cache: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
             emote_textures: std::collections::HashMap::new(),
             user_card: None,
@@ -392,9 +402,9 @@ impl eframe::App for KickterinoApp {
             }
         }
 
-        // top: tabs + settings
+        // top: tab bar (Chatterino-style: clean, compact)
         egui::Panel::top("top").show(ui, |ui| {
-            ui.horizontal_wrapped(|ui| {
+            ui.horizontal(|ui| {
                 for idx in 0..self.tabs.len() {
                     let label = if self.tabs[idx].channel.is_empty() {
                         "new".to_string()
@@ -402,10 +412,19 @@ impl eframe::App for KickterinoApp {
                         self.tabs[idx].channel.clone()
                     };
                     let selected = idx == self.active;
-                    if ui.selectable_label(selected, label).clicked() {
+                    let tab_label = if selected {
+                        egui::RichText::new(&label).strong()
+                    } else {
+                        egui::RichText::new(&label)
+                    };
+                    let tab_resp = ui.selectable_label(selected, tab_label);
+                    if tab_resp.clicked() {
                         self.active = idx;
                     }
-                    if self.tabs.len() > 1 && ui.small_button("x").clicked() {
+                    // Chatterino-style: close tab via middle click or right click
+                    let close = self.tabs.len() > 1
+                        && (tab_resp.middle_clicked() || tab_resp.secondary_clicked());
+                    if close {
                         self.tabs.remove(idx);
                         if self.active >= self.tabs.len() {
                             self.active = self.tabs.len().saturating_sub(1);
@@ -413,28 +432,24 @@ impl eframe::App for KickterinoApp {
                         return;
                     }
                 }
-                if ui.button("+").clicked() {
+                if ui.small_button("+").clicked() {
                     self.tabs.push(ChatTab::new(""));
                     self.active = self.tabs.len() - 1;
                 }
-            });
-            ui.horizontal(|ui| {
-                ui.label("Font:");
-                ui.add(egui::Slider::new(&mut self.font_size, 10.0..=22.0));
-                ui.checkbox(&mut self.show_timestamps, "TS");
-                ui.checkbox(&mut self.show_badges, "Badges");
-                ui.checkbox(&mut self.timestamp_24h, "24h time");
-                ui.checkbox(&mut self.theme_dark, "Dark theme");
-                ui.checkbox(&mut self.always_on_top, "Always on top");
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    if ui.small_button("⚙").clicked() {
+                        self.show_settings = !self.show_settings;
+                    }
+                });
             });
         });
 
-        // active tab channel controls
+        // channel control bar
         if let Some(tab) = self.tabs.get_mut(self.active) {
             egui::Panel::top("chan").show(ui, |ui| {
                 ui.horizontal(|ui| {
                     ui.label("Channel:");
-                    ui.text_edit_singleline(&mut tab.channel);
+                    ui.add(egui::TextEdit::singleline(&mut tab.channel).desired_width(140.0));
                     let ctx = ui.ctx().clone();
                     if ui.button("Connect").clicked() {
                         tab.connect(ctx);
@@ -443,7 +458,7 @@ impl eframe::App for KickterinoApp {
                         tab.messages.clear();
                         tab.seen.clear();
                     }
-                    if ui.button("Search").clicked() {
+                    if ui.button(if tab.search_open { "Hide search" } else { "Search" }).clicked() {
                         tab.search_open = !tab.search_open;
                     }
                     ui.checkbox(&mut tab.auto_scroll, "Auto-scroll");
@@ -452,21 +467,26 @@ impl eframe::App for KickterinoApp {
                     }
                     ui.label(&tab.status);
                 });
-                if let Some(si) = &tab.stream_info {
-                    ui.horizontal(|ui| {
-                        if !si.title.is_empty() { ui.label(format!("Title: {}", si.title)); }
-                        if !si.category.is_empty() { ui.label(format!("| {}", si.category)); }
-                        ui.label(format!("| Viewers: {}", si.viewers));
-                        ui.label(format!("| Followers: {}", si.followers));
+                // compact stream info / pinned bar
+                let has_info = tab.stream_info.is_some();
+                let has_pinned = tab.pinned.is_some();
+                if has_info || has_pinned {
+                    ui.horizontal_wrapped(|ui| {
+                        if let Some(si) = &tab.stream_info {
+                            if !si.title.is_empty() {
+                                ui.label(egui::RichText::new(&si.title).strong().small());
+                            }
+                            if !si.category.is_empty() {
+                                ui.label(egui::RichText::new(format!("· {}", si.category)).small());
+                            }
+                            ui.label(egui::RichText::new(format!("· 👁 {}", si.viewers)).small());
+                            ui.label(egui::RichText::new(format!("· ❤ {}", si.followers)).small());
+                        }
+                        if let Some(pinned) = &tab.pinned {
+                            ui.label(egui::RichText::new(format!("📌 {}", pinned)).small().strong());
+                        }
                     });
                 }
-                if let Some(pinned) = &tab.pinned {
-                    ui.label(egui::RichText::new(format!("📌 {}", pinned)).strong());
-                }
-                ui.horizontal(|ui| {
-                    ui.label("Access token:");
-                    ui.text_edit_singleline(&mut self.token);
-                });
                 if tab.search_open {
                     ui.horizontal(|ui| {
                         ui.label("Search:");
@@ -478,6 +498,59 @@ impl eframe::App for KickterinoApp {
                     });
                 }
             });
+        }
+
+        // settings in a separate native window (Chatterino-style), not embedded in app
+        if self.show_settings {
+            let mut still_open = true;
+            ui.ctx().show_viewport_immediate(
+                egui::ViewportId::from_hash_of("settings"),
+                egui::ViewportBuilder::default()
+                    .with_title("Settings")
+                    .with_inner_size([440.0, 560.0])
+                    .with_resizable(true),
+                |ctx, _class| {
+                    if ctx.input(|i| i.viewport().close_requested()) {
+                        still_open = false;
+                    }
+                    egui::CentralPanel::default().show(ctx, |ui| {
+                        egui::ScrollArea::vertical().show(ui, |ui| {
+                            egui::CollapsingHeader::new("Appearance").default_open(true).show(ui, |ui| {
+                                ui.horizontal(|ui| {
+                                    ui.label("Font size:");
+                                    ui.add(egui::Slider::new(&mut self.font_size, 10.0..=22.0));
+                                });
+                                ui.checkbox(&mut self.theme_dark, "Dark theme");
+                                ui.checkbox(&mut self.always_on_top, "Always on top");
+                            });
+                            egui::CollapsingHeader::new("Chat").default_open(true).show(ui, |ui| {
+                                ui.checkbox(&mut self.show_timestamps, "Show timestamps");
+                                ui.checkbox(&mut self.show_badges, "Show badges");
+                                ui.checkbox(&mut self.timestamp_24h, "24h time");
+                                ui.checkbox(&mut self.show_side_panel, "Show side panel");
+                                ui.checkbox(&mut self.split_view, "Split view (2 columns)");
+                                ui.label("Highlight words (comma separated):");
+                                ui.text_edit_singleline(&mut self.highlight_words);
+                                ui.label("Timestamps, badges and emotes are rendered inline.");
+                            });
+                            egui::CollapsingHeader::new("Behavior").default_open(false).show(ui, |ui| {
+                                ui.label("Auto-scroll sticks to bottom while new messages arrive.");
+                                if let Some(tab) = self.tabs.get_mut(self.active) {
+                                    ui.checkbox(&mut tab.auto_scroll, "Auto-scroll (active tab)");
+                                }
+                            });
+                            egui::CollapsingHeader::new("Account").default_open(false).show(ui, |ui| {
+                                ui.label("Kick access token (for sending messages):");
+                                ui.text_edit_singleline(&mut self.token);
+                                ui.small("Token is stored in memory only.");
+                            });
+                        });
+                    });
+                },
+            );
+            if !still_open {
+                self.show_settings = false;
+            }
         }
 
         // bottom input
@@ -498,6 +571,80 @@ impl eframe::App for KickterinoApp {
         // apply font
         ui.style_mut().text_styles.get_mut(&egui::TextStyle::Body).unwrap().size = self.font_size;
 
+        // split view right column (read-only chat of selected tab)
+        if self.split_view {
+            egui::Panel::right("splitright").resizable(true).default_size(400.0).show(ui, |ui| {
+                ui.horizontal(|ui| {
+                    ui.label("Tab:");
+                    // selector
+                    egui::ComboBox::from_id_salt("split_tab")
+                        .selected_text(if self.tabs.is_empty() { "none".to_string() } else { self.tabs[self.active_right.min(self.tabs.len()-1)].channel.clone() })
+                        .show_ui(ui, |ui| {
+                            for idx in 0..self.tabs.len() {
+                                let lbl = if self.tabs[idx].channel.is_empty() { "new".to_string() } else { self.tabs[idx].channel.clone() };
+                                if ui.selectable_label(self.active_right == idx, lbl).clicked() {
+                                    self.active_right = idx;
+                                }
+                            }
+                        });
+                });
+                ui.separator();
+                let idx = self.active_right.min(self.tabs.len().saturating_sub(1));
+                let msgs = self.tabs[idx].messages.clone();
+                let auto = self.tabs[idx].auto_scroll;
+                egui::ScrollArea::vertical().stick_to_bottom(auto).show(ui, |ui| {
+                    for m in &msgs {
+                        if m.is_system {
+                            ui.label(egui::RichText::new(&m.text).italics().color(egui::Color32::from_gray(160)));
+                            continue;
+                        }
+                        let row = ui.horizontal_wrapped(|ui| {
+                            if self.show_timestamps {
+                                if let Some(ts) = &m.created_at {
+                                    ui.label(egui::RichText::new(ts).small().color(egui::Color32::from_gray(100)));
+                                }
+                            }
+                            let name_color = m.color.as_deref().and_then(parse_color).unwrap_or(egui::Color32::from_rgb(80,160,255));
+                            ui.label(egui::RichText::new(&m.user).strong().color(name_color));
+                            ui.label(egui::RichText::new(":").color(egui::Color32::from_gray(120)));
+                            for (is_emote, seg) in split_content(&m.text) {
+                                if is_emote { render_emote(ui, self, &seg); } else { ui.label(seg); }
+                            }
+                        });
+                        let _ = row;
+                    }
+                });
+            });
+        }
+
+        // side panel (Chatterino-style channel info)
+        if self.show_side_panel {
+            egui::Panel::right("side").resizable(true).default_size(220.0).show(ui, |ui| {
+                ui.heading("Channel");
+                if let Some(tab) = self.tabs.get(self.active) {
+                    ui.label(format!("Name: {}", if tab.channel.is_empty() { "—" } else { &tab.channel }));
+                    ui.label(format!("Status: {}", tab.status));
+                    if let Some(si) = &tab.stream_info {
+                        ui.separator();
+                        ui.label(egui::RichText::new("Stream info").strong());
+                        if !si.title.is_empty() { ui.label(format!("Title: {}", si.title)); }
+                        if !si.category.is_empty() { ui.label(format!("Category: {}", si.category)); }
+                        ui.label(format!("Viewers: {}", si.viewers));
+                        ui.label(format!("Followers: {}", si.followers));
+                        if !si.started_at.is_empty() { ui.label(format!("Started: {}", si.started_at)); }
+                    }
+                    if let Some(pinned) = &tab.pinned {
+                        ui.separator();
+                        ui.label(egui::RichText::new("Pinned").strong());
+                        ui.label(pinned);
+                    }
+                    ui.separator();
+                    ui.label(format!("Messages: {}", tab.messages.len()));
+                    ui.label(format!("Ignored users: {}", tab.ignored.len()));
+                }
+            });
+        }
+
         egui::CentralPanel::default().show(ui, |ui| {
             ui.spacing_mut().item_spacing = egui::vec2(4.0, 2.0);
             let i = self.active;
@@ -506,10 +653,12 @@ impl eframe::App for KickterinoApp {
             let msgs: Vec<ChatMsg> = self.tabs[i].messages.clone();
             let mut pending_ignore: Vec<String> = Vec::new();
             let mut pending_user_card: Option<String> = None;
+            let mut pending_reply: Option<String> = None;
             egui::ScrollArea::vertical()
                 .stick_to_bottom(auto_scroll)
                 .show(ui, |ui| {
                     let query = search_query.to_lowercase();
+                    let mut last_user: Option<String> = None;
                     for m in &msgs {
                         if !query.is_empty() {
                             let hay = format!("{} {}", m.user, m.text).to_lowercase();
@@ -523,8 +672,10 @@ impl eframe::App for KickterinoApp {
                                     .italics()
                                     .color(egui::Color32::from_gray(160)),
                             );
+                            last_user = None;
                             continue;
                         }
+                        let grouped = last_user.as_deref() == Some(m.user.as_str());
                         if let Some(rt) = &m.reply_to {
                             ui.label(
                                 egui::RichText::new(format!("↪ {}", rt))
@@ -534,6 +685,12 @@ impl eframe::App for KickterinoApp {
                             );
                         }
                         let is_mention = m.text.contains('@');
+                        let lower_text = m.text.to_lowercase();
+                        let is_highlight = !self.highlight_words.trim().is_empty()
+                            && self.highlight_words.split(',').any(|w| {
+                                let w = w.trim().to_lowercase();
+                                !w.is_empty() && lower_text.contains(&w)
+                            });
                         let row = ui.horizontal_wrapped(|ui| {
                             if self.show_timestamps {
                                 if let Some(ts) = &m.created_at {
@@ -545,11 +702,11 @@ impl eframe::App for KickterinoApp {
                                     ui.label(
                                         egui::RichText::new(t)
                                             .small()
-                                            .color(egui::Color32::from_gray(120)),
+                                            .color(egui::Color32::from_gray(100)),
                                     );
                                 }
                             }
-                            if self.show_badges {
+                            if self.show_badges && !grouped {
                                 for b in &m.badges {
                                     if let Some(url) = &b.image_url {
                                         render_badge_image(ui, self, url, &b.text);
@@ -568,18 +725,23 @@ impl eframe::App for KickterinoApp {
                                 .as_deref()
                                 .and_then(parse_color)
                                 .unwrap_or(egui::Color32::from_rgb(80, 160, 255));
-                            let name_resp = ui.add(
-                                egui::Label::new(
-                                    egui::RichText::new(&m.user).strong().color(name_color),
-                                )
-                                .sense(egui::Sense::click()),
-                            );
-                            if name_resp.clicked() {
-                                pending_user_card = Some(m.user.clone());
+                            if !grouped {
+                                let name_resp = ui.add(
+                                    egui::Label::new(
+                                        egui::RichText::new(&m.user).strong().color(name_color),
+                                    )
+                                    .sense(egui::Sense::click()),
+                                );
+                                if name_resp.clicked() {
+                                    pending_user_card = Some(m.user.clone());
+                                }
+                                ui.label(
+                                    egui::RichText::new(":").color(egui::Color32::from_gray(120)),
+                                );
+                            } else {
+                                // grouped: indent to align with message text
+                                ui.label(egui::RichText::new("   ").small().color(egui::Color32::TRANSPARENT));
                             }
-                            ui.label(
-                                egui::RichText::new(":").color(egui::Color32::from_gray(120)),
-                            );
                             let text_color = if is_mention {
                                 egui::Color32::from_rgb(255, 230, 120)
                             } else {
@@ -595,6 +757,16 @@ impl eframe::App for KickterinoApp {
                                 }
                             }
                         });
+                        // row background: mention / highlight / hover
+                        let rect = row.response.rect;
+                        if is_mention {
+                            ui.painter().rect_filled(rect, 2.0, egui::Color32::from_rgba_unmultiplied(255, 230, 120, 18));
+                        } else if is_highlight {
+                            ui.painter().rect_filled(rect, 2.0, egui::Color32::from_rgba_unmultiplied(120, 200, 255, 18));
+                        }
+                        if row.response.hovered() {
+                            ui.painter().rect_filled(rect, 2.0, egui::Color32::from_rgba_unmultiplied(255,255,255,12));
+                        }
                         let msg = m.clone();
                         row.response.context_menu(|ui| {
                             if ui.button("Copy message").clicked() {
@@ -602,6 +774,9 @@ impl eframe::App for KickterinoApp {
                             }
                             if ui.button("Copy username").clicked() {
                                 ui.ctx().copy_text(msg.user.clone());
+                            }
+                            if ui.button("Reply").clicked() {
+                                pending_reply = Some(msg.user.clone());
                             }
                             if ui.button("Ignore user").clicked() {
                                 pending_ignore.push(msg.user.to_lowercase());
@@ -622,6 +797,7 @@ impl eframe::App for KickterinoApp {
                                 }
                             }
                         });
+                        last_user = Some(m.user.clone());
                     }
                 });
             // apply pending
@@ -631,6 +807,10 @@ impl eframe::App for KickterinoApp {
             }
             if let Some(u) = pending_user_card {
                 self.fetch_user_card(u);
+            }
+            if let Some(u) = pending_reply {
+                let i = self.active;
+                self.tabs[i].input = format!("@{} ", u);
             }
         });
 
