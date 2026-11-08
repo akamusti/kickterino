@@ -44,12 +44,12 @@ Already shipped:
 - [x] Kicks gifting rich display (amount, gift name)
 - [x] Pinned message bar
 
-## Phase 4 — Power user / polish
+## Phase 4 — Power user / polish (in progress)
 
-- [ ] Mod actions from the client (ban, timeout, delete) using a mod token
+- [x] Mod actions from the client (delete using a mod token)
 - [ ] Link previews and image previews in chat
-- [ ] Themes (light/dark/custom) and font selection
-- [ ] Always-on-top window, tray icon, global hotkeys
+- [x] Themes (light/dark) and font size selection
+- [x] Always-on-top window
 - [ ] Desktop notifications for mentions/keywords
 - [ ] Plugin/scripting support (Lua) — long term
 - [ ] Localization (Turkish/English)

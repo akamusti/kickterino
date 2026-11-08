@@ -65,6 +65,8 @@ struct AppState {
     timestamp_24h: bool,
     show_timestamps: bool,
     show_badges: bool,
+    theme_dark: bool,
+    always_on_top: bool,
 }
 
 struct ChatTab {
@@ -219,6 +221,8 @@ struct KickterinoApp {
     show_badges: bool,
     font_size: f32,
     timestamp_24h: bool,
+    theme_dark: bool,
+    always_on_top: bool,
     emote_cache: Arc<std::sync::Mutex<std::collections::HashMap<String, EmoteState>>>,
     emote_textures: std::collections::HashMap<String, egui::TextureHandle>,
     user_card: Option<UserCard>,
@@ -258,6 +262,8 @@ impl KickterinoApp {
             show_badges: if state.show_badges { true } else { true },
             font_size: if state.font_size > 0.0 { state.font_size } else { 14.0 },
             timestamp_24h: state.timestamp_24h || state.timestamp_24h == false && true,
+            theme_dark: true,
+            always_on_top: false,
             emote_cache: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
             emote_textures: std::collections::HashMap::new(),
             user_card: None,
@@ -273,6 +279,8 @@ impl KickterinoApp {
             timestamp_24h: self.timestamp_24h,
             show_timestamps: self.show_timestamps,
             show_badges: self.show_badges,
+            theme_dark: self.theme_dark,
+            always_on_top: self.always_on_top,
         };
         if let Ok(json) = serde_json::to_string_pretty(&state) {
             let _ = std::fs::write(&self.state_path, json);
@@ -359,6 +367,16 @@ impl eframe::App for KickterinoApp {
     }
 
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
+        if self.theme_dark {
+            ui.ctx().set_visuals(egui::Visuals::dark());
+        } else {
+            ui.ctx().set_visuals(egui::Visuals::light());
+        }
+        if self.always_on_top {
+            ui.ctx().send_viewport_cmd(egui::ViewportCommand::WindowLevel(egui::WindowLevel::AlwaysOnTop));
+        } else {
+            ui.ctx().send_viewport_cmd(egui::ViewportCommand::WindowLevel(egui::WindowLevel::Normal));
+        }
         // keyboard shortcuts for active tab
         let i = self.active;
         if ui.input(|inp| inp.modifiers.ctrl && inp.key_pressed(egui::Key::L)) {
@@ -405,6 +423,8 @@ impl eframe::App for KickterinoApp {
                 ui.checkbox(&mut self.show_timestamps, "TS");
                 ui.checkbox(&mut self.show_badges, "Badges");
                 ui.checkbox(&mut self.timestamp_24h, "24h time");
+                ui.checkbox(&mut self.theme_dark, "Dark theme");
+                ui.checkbox(&mut self.always_on_top, "Always on top");
             });
         });
 
@@ -579,6 +599,21 @@ impl eframe::App for KickterinoApp {
                             }
                             if ui.button("Ignore user").clicked() {
                                 pending_ignore.push(msg.user.to_lowercase());
+                            }
+                            if !self.token.is_empty() {
+                                if let Some(id) = &msg.id {
+                                    let idc = id.clone();
+                                    let tok = self.token.clone();
+                                    if ui.button("Delete message (mod)").clicked() {
+                                        thread::spawn(move || {
+                                            let rt = tokio::runtime::Runtime::new().unwrap();
+                                            rt.block_on(async move {
+                                                let client = kick_api::KickApiClient::with_token(tok);
+                                                let _ = client.chat().delete_message(&idc).await;
+                                            });
+                                        });
+                                    }
+                                }
                             }
                         });
                     }
