@@ -20,6 +20,7 @@ const MAX_MESSAGES: usize = 5000;
 struct Badge {
     text: String,
     kind: String,
+    image_url: Option<String>,
 }
 
 #[derive(Clone)]
@@ -550,12 +551,16 @@ impl eframe::App for KickterinoApp {
                             }
                             if self.show_badges {
                                 for b in &m.badges {
-                                    let color = badge_color(&b.kind);
-                                    ui.label(
-                                        egui::RichText::new(format!("[{}]", b.text))
-                                            .small()
-                                            .color(color),
-                                    );
+                                    if let Some(url) = &b.image_url {
+                                        render_badge_image(ui, self, url, &b.text);
+                                    } else {
+                                        let color = badge_color(&b.kind);
+                                        ui.label(
+                                            egui::RichText::new(format!("[{}]", b.text))
+                                                .small()
+                                                .color(color),
+                                        );
+                                    }
                                 }
                             }
                             let name_color = m
@@ -712,6 +717,60 @@ fn render_emote(ui: &mut egui::Ui, app: &mut KickterinoApp, id: &str) {
     ui.label(format!("[{}]", id));
 }
 
+
+fn render_badge_image(ui: &mut egui::Ui, app: &mut KickterinoApp, url: &str, fallback: &str) {
+    // ensure fetch
+    {
+        let mut cache = app.emote_cache.lock().unwrap();
+        if !cache.contains_key(url) {
+            cache.insert(url.to_string(), EmoteState::Loading);
+            let url2 = url.to_string();
+            let cache2 = std::sync::Arc::clone(&app.emote_cache);
+            let ctx2 = ui.ctx().clone();
+            thread::spawn(move || {
+                let mut cmd = std::process::Command::new("curl");
+                cmd.args(["-sS", "-f", "-m", "20", "-H", "User-Agent: Mozilla/5.0", &url2]);
+                let res = cmd.output();
+                let mut cache = cache2.lock().unwrap();
+                match res {
+                    Ok(o) if o.status.success() && !o.stdout.is_empty() => {
+                        cache.insert(url2, EmoteState::Ready(o.stdout));
+                    }
+                    _ => {
+                        cache.insert(url2, EmoteState::Failed);
+                    }
+                }
+                ctx2.request_repaint();
+            });
+        }
+    }
+
+    if let Some(tex) = app.emote_textures.get(url) {
+        ui.add(egui::Image::new(tex).max_size(egui::vec2(18.0, 18.0)));
+        return;
+    }
+    let bytes_opt = {
+        let cache = app.emote_cache.lock().unwrap();
+        match cache.get(url) {
+            Some(EmoteState::Ready(b)) => Some(b.clone()),
+            _ => None,
+        }
+    };
+    if let Some(bytes) = bytes_opt {
+        if let Ok(img) = image::load_from_memory(&bytes) {
+            let rgba = img.to_rgba8();
+            let size = [rgba.width() as usize, rgba.height() as usize];
+            let color_image = egui::ColorImage::from_rgba_unmultiplied(size, rgba.as_flat_samples().as_slice());
+            let tex = ui.ctx().load_texture(url, color_image, egui::TextureOptions::default());
+            app.emote_textures.insert(url.to_string(), tex.clone());
+            ui.add(egui::Image::new(&tex).max_size(egui::vec2(18.0, 18.0)));
+            return;
+        }
+    }
+    let color = badge_color(fallback);
+    ui.label(egui::RichText::new(format!("[{}]", fallback)).small().color(color));
+}
+
 fn to_12h(ts: &str) -> String {
     if ts.len() < 8 {
         return ts.to_string();
@@ -765,23 +824,32 @@ fn parse_badges(v: &Value) -> Vec<Badge> {
     if let Some(arr) = v.as_array() {
         for b in arr {
             if let Some(s) = b.as_str() {
-                out.push(Badge { text: s.to_string(), kind: s.to_lowercase() });
+                out.push(Badge { text: s.to_string(), kind: s.to_lowercase(), image_url: None });
             } else if let Some(obj) = b.as_object() {
                 let text = obj
                     .get("text")
                     .or_else(|| obj.get("label"))
+                    .or_else(|| obj.get("name"))
+                    .or_else(|| obj.get("badge_type"))
                     .and_then(|x| x.as_str())
                     .unwrap_or("")
                     .to_string();
                 let kind = obj
                     .get("type")
+                    .or_else(|| obj.get("badge_type"))
+                    .or_else(|| obj.get("name"))
                     .and_then(|x| x.as_str())
                     .unwrap_or("")
                     .to_string();
+                let image_url = obj
+                    .get("image_url")
+                    .or_else(|| obj.get("image"))
+                    .and_then(|x| x.as_str())
+                    .map(|s| s.to_string());
                 if !text.is_empty() {
-                    out.push(Badge { text, kind });
+                    out.push(Badge { text, kind, image_url });
                 } else if !kind.is_empty() {
-                    out.push(Badge { text: kind.clone(), kind });
+                    out.push(Badge { text: kind.clone(), kind, image_url });
                 }
             }
         }
@@ -1401,7 +1469,17 @@ impl Drop for KickterinoApp {
 
 fn main() -> eframe::Result<()> {
     env_logger::init();
-    let options = eframe::NativeOptions::default();
+    let mut options = eframe::NativeOptions::default();
+    // window icon from bundled logo
+    if let Ok(img) = image::load_from_memory(include_bytes!("../assets/logo.jpg")) {
+        let rgba = img.to_rgba8();
+        let (w, h) = rgba.dimensions();
+        options.viewport.icon = Some(std::sync::Arc::new(egui::IconData {
+            rgba: rgba.into_raw(),
+            width: w,
+            height: h,
+        }));
+    }
     eframe::run_native(
         "kickterino",
         options,
