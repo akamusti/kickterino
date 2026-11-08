@@ -23,6 +23,15 @@ struct Badge {
 }
 
 #[derive(Clone)]
+struct StreamInfo {
+    title: String,
+    category: String,
+    viewers: String,
+    followers: String,
+    started_at: String,
+}
+
+#[derive(Clone)]
 struct ChatMsg {
     id: Option<String>,
     user: String,
@@ -43,6 +52,9 @@ enum WorkerMsg {
     Delete(String),
     System(String),
     Error(String),
+    StreamInfo(StreamInfo),
+    Pinned(String),
+    Unpinned,
 }
 
 #[derive(Serialize, Deserialize, Default)]
@@ -69,6 +81,8 @@ struct ChatTab {
     ignored: HashSet<String>,
     seen: HashSet<String>,
     auto_scroll: bool,
+    stream_info: Option<StreamInfo>,
+    pinned: Option<String>,
 }
 
 impl ChatTab {
@@ -88,6 +102,8 @@ impl ChatTab {
             ignored: HashSet::new(),
             seen: HashSet::new(),
             auto_scroll: true,
+            stream_info: None,
+            pinned: None,
         }
     }
 
@@ -333,6 +349,9 @@ impl eframe::App for KickterinoApp {
                             tab.messages.drain(0..drain);
                         }
                     }
+                    WorkerMsg::StreamInfo(si) => tab.stream_info = Some(si),
+                    WorkerMsg::Pinned(p) => tab.pinned = Some(p),
+                    WorkerMsg::Unpinned => tab.pinned = None,
                     WorkerMsg::Error(e) => tab.status = e,
                 }
             }
@@ -412,6 +431,17 @@ impl eframe::App for KickterinoApp {
                     }
                     ui.label(&tab.status);
                 });
+                if let Some(si) = &tab.stream_info {
+                    ui.horizontal(|ui| {
+                        if !si.title.is_empty() { ui.label(format!("Title: {}", si.title)); }
+                        if !si.category.is_empty() { ui.label(format!("| {}", si.category)); }
+                        ui.label(format!("| Viewers: {}", si.viewers));
+                        ui.label(format!("| Followers: {}", si.followers));
+                    });
+                }
+                if let Some(pinned) = &tab.pinned {
+                    ui.label(egui::RichText::new(format!("📌 {}", pinned)).strong());
+                }
                 ui.horizontal(|ui| {
                     ui.label("Access token:");
                     ui.text_edit_singleline(&mut self.token);
@@ -927,6 +957,51 @@ async fn fetch_channel_info(slug: &str) -> Result<ChannelInfo> {
     })
 }
 
+
+async fn fetch_stream_info(slug: &str) -> Option<StreamInfo> {
+    let url = format!("https://kick.com/api/v2/channels/{}", slug);
+    let mut cmd = tokio::process::Command::new("curl");
+    cmd.args([
+        "-sS",
+        "-f",
+        "-m",
+        "20",
+        "-H",
+        "Accept: application/json",
+        "-H",
+        "User-Agent: Mozilla/5.0",
+        &url,
+    ]);
+    hide_console_window(&mut cmd);
+    let output = cmd.output().await.ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let v: Value = serde_json::from_slice(&output.stdout).ok()?;
+    let user = &v["user"];
+    let ls = &v["livestream"];
+    let title = ls["session_title"].as_str().unwrap_or("").to_string();
+    let category = ls["categories"]
+        .as_array()
+        .and_then(|a| a.first())
+        .and_then(|c| c["name"].as_str())
+        .unwrap_or("")
+        .to_string();
+    let viewers = ls["viewer_count"]
+        .as_i64()
+        .map(|n| n.to_string())
+        .unwrap_or_else(|| ls["viewer_count"].as_str().unwrap_or("0").to_string());
+    let followers = v["followers_count"].as_str().unwrap_or("0").to_string();
+    let started = ls["started_at"].as_str().unwrap_or("").to_string();
+    Some(StreamInfo {
+        title,
+        category,
+        viewers,
+        followers,
+        started_at: started,
+    })
+}
+
 async fn post_json(url: &str, body: &Value) -> Result<Value> {
     let mut cmd = tokio::process::Command::new("curl");
     cmd.args([
@@ -996,6 +1071,12 @@ async fn run_chat(
     let info = fetch_channel_info(channel).await?;
     if !is_current() {
         return Ok(());
+    }
+
+    if let Some(si) = fetch_stream_info(channel).await {
+        if is_current() {
+            notify(tx, ctx, WorkerMsg::StreamInfo(si));
+        }
     }
 
     let history = fetch_history(info.chatroom_id).await;
@@ -1234,7 +1315,11 @@ fn handle_push(push: &Value, tx: &Sender<WorkerMsg>, ctx: &egui::Context) {
                     ctx,
                     WorkerMsg::System(format!("Pinned by {}: {}", user, content)),
                 );
+                notify(tx, ctx, WorkerMsg::Pinned(format!("{}: {}", user, content)));
             }
+        }
+        "App\\Events\\PinnedMessageDeletedEvent" => {
+            notify(tx, ctx, WorkerMsg::Unpinned);
         }
         "App\\Events\\RewardRedeemedEvent" => {
             let user = payload["username"].as_str().unwrap_or("someone");
@@ -1254,6 +1339,19 @@ fn handle_push(push: &Value, tx: &Sender<WorkerMsg>, ctx: &egui::Context) {
                 ctx,
                 WorkerMsg::System(format!("{} gifted {}x {}", sender, amount, name)),
             );
+        }
+        "App\\Events\\PollCreatedEvent" | "App\\Events\\PollUpdatedEvent" => {
+            let title = payload["title"].as_str().or_else(|| payload["poll"]["title"].as_str()).unwrap_or("Poll");
+            notify(tx, ctx, WorkerMsg::System(format!("Poll: {}", title)));
+        }
+        "App\\Events\\RaidEvent" | "App\\Events\\RaidedEvent" => {
+            let from = payload["raider"]["username"].as_str().or_else(|| payload["username"].as_str()).unwrap_or("someone");
+            let viewers = payload["viewers"].as_i64().unwrap_or(0);
+            notify(tx, ctx, WorkerMsg::System(format!("{} raided with {} viewers", from, viewers)));
+        }
+        "App\\Events\\HostEvent" | "App\\Events\\HostedEvent" => {
+            let from = payload["hoster"]["username"].as_str().or_else(|| payload["username"].as_str()).unwrap_or("someone");
+            notify(tx, ctx, WorkerMsg::System(format!("{} is hosting", from)));
         }
         _ => {}
     }

@@ -35,14 +35,14 @@ Already shipped:
 - [x] Emote image rendering (Kick emotes) instead of text placeholders
 - [ ] 7TV / BTTV / FFZ emote support (optional, extra requests)
 
-## Phase 3 — Kick-specific features
+## Phase 3 — Kick-specific features (done)
 
-- [ ] Stream info panel: title, category, viewer count, uptime, followers
-- [ ] Channel points / reward redemption display
-- [ ] Polls display and (optional) voting
-- [ ] Raid / host notifications
-- [ ] Kicks gifting rich display (amount, gift name)
-- [ ] Pinned message bar
+- [x] Stream info panel: title, category, viewer count, uptime, followers
+- [x] Channel points / reward redemption display
+- [x] Polls display and (optional) voting
+- [x] Raid / host notifications
+- [x] Kicks gifting rich display (amount, gift name)
+- [x] Pinned message bar
 
 ## Phase 4 — Power user / polish
 
