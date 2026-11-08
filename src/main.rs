@@ -498,6 +498,7 @@ impl eframe::App for KickterinoApp {
         ui.style_mut().text_styles.get_mut(&egui::TextStyle::Body).unwrap().size = self.font_size;
 
         egui::CentralPanel::default().show(ui, |ui| {
+            ui.spacing_mut().item_spacing = egui::vec2(4.0, 2.0);
             let i = self.active;
             let auto_scroll = self.tabs[i].auto_scroll;
             let search_query = self.tabs[i].search_query.clone();
@@ -685,7 +686,7 @@ fn render_emote(ui: &mut egui::Ui, app: &mut KickterinoApp, id: &str) {
     }
 
     if let Some(tex) = app.emote_textures.get(id) {
-        ui.add(egui::Image::new(tex).max_size(egui::vec2(32.0, 32.0)));
+        ui.add(egui::Image::new(tex).max_size(egui::vec2(48.0, 48.0)));
         return;
     }
 
