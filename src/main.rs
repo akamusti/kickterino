@@ -268,7 +268,7 @@ impl KickterinoApp {
             show_timestamps: if state.show_timestamps { true } else { true },
             show_badges: if state.show_badges { true } else { true },
             font_size: if state.font_size > 0.0 { state.font_size } else { 14.0 },
-            timestamp_24h: state.timestamp_24h || state.timestamp_24h == false && true,
+            timestamp_24h: state.timestamp_24h,
             theme_dark: true,
             always_on_top: false,
             show_settings: false,
@@ -327,6 +327,76 @@ impl KickterinoApp {
     }
 }
 
+fn apply_theme(ctx: &egui::Context, dark: bool) {
+    let mut visuals = if dark {
+        egui::Visuals::dark()
+    } else {
+        egui::Visuals::light()
+    };
+    if dark {
+        visuals.window_fill = egui::Color32::from_rgb(24, 24, 28);
+        visuals.panel_fill = egui::Color32::from_rgb(18, 18, 22);
+        visuals.faint_bg_color = egui::Color32::from_rgb(28, 28, 34);
+        visuals.extreme_bg_color = egui::Color32::from_rgb(12, 12, 16);
+        visuals.code_bg_color = egui::Color32::from_rgb(28, 28, 34);
+        visuals.selection.bg_fill = egui::Color32::from_rgb(83, 252, 24);
+        visuals.selection.stroke = egui::Stroke::new(1.0, egui::Color32::from_rgb(83, 252, 24));
+        visuals.hyperlink_color = egui::Color32::from_rgb(83, 252, 24);
+        visuals.override_text_color = Some(egui::Color32::from_rgb(242, 242, 245));
+        visuals.weak_text_color = Some(egui::Color32::from_rgb(150, 150, 160));
+        visuals.widgets.noninteractive.bg_fill = egui::Color32::from_rgb(24, 24, 28);
+        visuals.widgets.inactive.bg_fill = egui::Color32::from_rgb(32, 32, 38);
+        visuals.widgets.hovered.bg_fill = egui::Color32::from_rgb(44, 44, 52);
+        visuals.widgets.active.bg_fill = egui::Color32::from_rgb(83, 252, 24);
+        visuals.widgets.open.bg_fill = egui::Color32::from_rgb(32, 32, 38);
+    } else {
+        visuals.window_fill = egui::Color32::from_rgb(250, 250, 252);
+        visuals.panel_fill = egui::Color32::from_rgb(244, 244, 248);
+        visuals.faint_bg_color = egui::Color32::from_rgb(238, 238, 242);
+        visuals.extreme_bg_color = egui::Color32::from_rgb(255, 255, 255);
+        visuals.code_bg_color = egui::Color32::from_rgb(238, 238, 242);
+        visuals.selection.bg_fill = egui::Color32::from_rgb(34, 197, 94);
+        visuals.selection.stroke = egui::Stroke::new(1.0, egui::Color32::from_rgb(34, 197, 94));
+        visuals.hyperlink_color = egui::Color32::from_rgb(34, 197, 94);
+        visuals.override_text_color = Some(egui::Color32::from_rgb(24, 24, 28));
+        visuals.weak_text_color = Some(egui::Color32::from_rgb(100, 100, 112));
+        visuals.widgets.noninteractive.bg_fill = egui::Color32::from_rgb(250, 250, 252);
+        visuals.widgets.inactive.bg_fill = egui::Color32::from_rgb(238, 238, 242);
+        visuals.widgets.hovered.bg_fill = egui::Color32::from_rgb(228, 228, 234);
+        visuals.widgets.active.bg_fill = egui::Color32::from_rgb(34, 197, 94);
+        visuals.widgets.open.bg_fill = egui::Color32::from_rgb(238, 238, 242);
+    }
+    let rounding = egui::CornerRadius::same(8);
+    for w in [
+        &mut visuals.widgets.noninteractive,
+        &mut visuals.widgets.inactive,
+        &mut visuals.widgets.hovered,
+        &mut visuals.widgets.active,
+        &mut visuals.widgets.open,
+    ] {
+        w.corner_radius = rounding;
+    }
+    visuals.window_corner_radius = egui::CornerRadius::same(12);
+    visuals.menu_corner_radius = egui::CornerRadius::same(8);
+    ctx.set_visuals(visuals);
+
+    ctx.global_style_mut(|style| {
+        style.spacing.item_spacing = egui::vec2(8.0, 4.0);
+        style.spacing.button_padding = egui::vec2(10.0, 6.0);
+        style.spacing.window_margin = egui::Margin::same(12);
+        style.spacing.menu_margin = egui::Margin::same(6);
+        for w in [
+            &mut style.visuals.widgets.noninteractive,
+            &mut style.visuals.widgets.inactive,
+            &mut style.visuals.widgets.hovered,
+            &mut style.visuals.widgets.active,
+            &mut style.visuals.widgets.open,
+        ] {
+            w.corner_radius = rounding;
+        }
+    });
+}
+
 impl eframe::App for KickterinoApp {
     fn logic(&mut self, _ctx: &egui::Context, _frame: &mut eframe::Frame) {
         for tab in &mut self.tabs {
@@ -380,11 +450,7 @@ impl eframe::App for KickterinoApp {
     }
 
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
-        if self.theme_dark {
-            ui.ctx().set_visuals(egui::Visuals::dark());
-        } else {
-            ui.ctx().set_visuals(egui::Visuals::light());
-        }
+        apply_theme(ui.ctx(), self.theme_dark);
         if self.always_on_top {
             ui.ctx().send_viewport_cmd(egui::ViewportCommand::WindowLevel(egui::WindowLevel::AlwaysOnTop));
         } else {
@@ -404,8 +470,9 @@ impl eframe::App for KickterinoApp {
             }
         }
 
-        // top: tab bar (Chatterino-style: clean, compact)
+        // top: tab bar
         egui::Panel::top("top").show(ui, |ui| {
+            ui.add_space(4.0);
             ui.horizontal(|ui| {
                 for idx in 0..self.tabs.len() {
                     let label = if self.tabs[idx].channel.is_empty() {
@@ -415,15 +482,18 @@ impl eframe::App for KickterinoApp {
                     };
                     let selected = idx == self.active;
                     let tab_label = if selected {
-                        egui::RichText::new(&label).strong()
+                        egui::RichText::new(&label).strong().color(egui::Color32::from_rgb(18, 18, 22))
                     } else {
                         egui::RichText::new(&label)
                     };
-                    let tab_resp = ui.selectable_label(selected, tab_label);
+                    let tab_resp = if selected {
+                        ui.add(egui::Button::new(tab_label).fill(egui::Color32::from_rgb(83, 252, 24)).corner_radius(egui::CornerRadius::same(6)))
+                    } else {
+                        ui.add(egui::Button::new(tab_label).fill(egui::Color32::TRANSPARENT).corner_radius(egui::CornerRadius::same(6)))
+                    };
                     if tab_resp.clicked() {
                         self.active = idx;
                     }
-                    // Chatterino-style: close tab via middle click or right click
                     let close = self.tabs.len() > 1
                         && (tab_resp.middle_clicked() || tab_resp.secondary_clicked());
                     if close {
@@ -434,44 +504,60 @@ impl eframe::App for KickterinoApp {
                         return;
                     }
                 }
-                if ui.small_button("+").clicked() {
+                if ui.add(egui::Button::new("+").corner_radius(egui::CornerRadius::same(6))).clicked() {
                     self.tabs.push(ChatTab::new(""));
                     self.active = self.tabs.len() - 1;
                 }
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    let acct_label = if self.token.trim().is_empty() { "Account: guest ⚠" } else { "Account: connected ✓" };
-                    if ui.small_button(acct_label).clicked() {
+                    let acct_label = if self.token.trim().is_empty() { "Account: guest" } else { "Account: connected" };
+                    let acct_color = if self.token.trim().is_empty() {
+                        egui::Color32::from_rgb(255, 180, 60)
+                    } else {
+                        egui::Color32::from_rgb(83, 252, 24)
+                    };
+                    if ui.add(egui::Button::new(egui::RichText::new(acct_label).color(acct_color)).corner_radius(egui::CornerRadius::same(6))).clicked() {
                         self.show_connect = !self.show_connect;
                     }
-                    if ui.small_button("⚙").clicked() {
+                    if ui.add(egui::Button::new("⚙").corner_radius(egui::CornerRadius::same(6))).clicked() {
                         self.show_settings = !self.show_settings;
                     }
                 });
             });
+            ui.add_space(4.0);
         });
 
         // channel control bar
         if let Some(tab) = self.tabs.get_mut(self.active) {
             egui::Panel::top("chan").show(ui, |ui| {
+                ui.add_space(4.0);
                 ui.horizontal(|ui| {
-                    ui.label("Channel:");
-                    ui.add(egui::TextEdit::singleline(&mut tab.channel).desired_width(140.0));
+                    ui.label(egui::RichText::new("Channel").strong().small());
+                    ui.add(egui::TextEdit::singleline(&mut tab.channel).desired_width(160.0).hint_text("slug"));
                     let ctx = ui.ctx().clone();
-                    if ui.button("Connect").clicked() {
+                    if ui.add(egui::Button::new("Connect").corner_radius(egui::CornerRadius::same(6))).clicked() {
                         tab.connect(ctx);
                     }
-                    if ui.button("Clear").clicked() {
+                    if ui.add(egui::Button::new("Clear").corner_radius(egui::CornerRadius::same(6))).clicked() {
                         tab.messages.clear();
                         tab.seen.clear();
                     }
-                    if ui.button(if tab.search_open { "Hide search" } else { "Search" }).clicked() {
+                    if ui.add(egui::Button::new(if tab.search_open { "Hide search" } else { "Search" }).corner_radius(egui::CornerRadius::same(6))).clicked() {
                         tab.search_open = !tab.search_open;
                     }
                     ui.checkbox(&mut tab.auto_scroll, "Auto-scroll");
-                    if ui.button("Jump bottom").clicked() {
+                    if ui.add(egui::Button::new("Jump bottom").corner_radius(egui::CornerRadius::same(6))).clicked() {
                         tab.auto_scroll = true;
                     }
-                    ui.label(&tab.status);
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        let status_color = if tab.status.to_lowercase().contains("error") || tab.status.to_lowercase().contains("fail") {
+                            egui::Color32::from_rgb(255, 100, 100)
+                        } else if tab.status.to_lowercase().contains("connected") || tab.status.to_lowercase().contains("sent") {
+                            egui::Color32::from_rgb(83, 252, 24)
+                        } else {
+                            egui::Color32::from_gray(160)
+                        };
+                        ui.label(egui::RichText::new(&tab.status).small().color(status_color));
+                    });
                 });
                 // compact stream info / pinned bar
                 let has_info = tab.stream_info.is_some();
@@ -480,16 +566,16 @@ impl eframe::App for KickterinoApp {
                     ui.horizontal_wrapped(|ui| {
                         if let Some(si) = &tab.stream_info {
                             if !si.title.is_empty() {
-                                ui.label(egui::RichText::new(&si.title).strong().small());
+                                ui.label(egui::RichText::new(&si.title).strong().small().color(egui::Color32::from_rgb(242,242,245)));
                             }
                             if !si.category.is_empty() {
-                                ui.label(egui::RichText::new(format!("· {}", si.category)).small());
+                                ui.label(egui::RichText::new(format!("· {}", si.category)).small().color(egui::Color32::from_gray(150)));
                             }
-                            ui.label(egui::RichText::new(format!("· 👁 {}", si.viewers)).small());
-                            ui.label(egui::RichText::new(format!("· ❤ {}", si.followers)).small());
+                            ui.label(egui::RichText::new(format!("· 👁 {}", si.viewers)).small().color(egui::Color32::from_gray(150)));
+                            ui.label(egui::RichText::new(format!("· ❤ {}", si.followers)).small().color(egui::Color32::from_gray(150)));
                         }
                         if let Some(pinned) = &tab.pinned {
-                            ui.label(egui::RichText::new(format!("📌 {}", pinned)).small().strong());
+                            ui.label(egui::RichText::new(format!("📌 {}", pinned)).small().strong().color(egui::Color32::from_rgb(255, 200, 80)));
                         }
                     });
                 }
@@ -608,10 +694,17 @@ impl eframe::App for KickterinoApp {
 
         // bottom input
         egui::Panel::bottom("bottom").show(ui, |ui| {
+            ui.add_space(6.0);
             ui.horizontal(|ui| {
                 let tab = &mut self.tabs[self.active];
-                let response = ui.text_edit_singleline(&mut tab.input);
-                let send = ui.button("Send").clicked()
+                let response = ui.add(
+                    egui::TextEdit::singleline(&mut tab.input)
+                        .desired_width(f32::INFINITY)
+                        .hint_text("Send a message…"),
+                );
+                let send = ui
+                    .add(egui::Button::new(egui::RichText::new("Send").color(egui::Color32::from_rgb(18, 18, 22)).strong()).fill(egui::Color32::from_rgb(83, 252, 24)).corner_radius(egui::CornerRadius::same(8)))
+                    .clicked()
                     || (response.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)));
                 if send {
                     let ctx = ui.ctx().clone();
@@ -619,6 +712,7 @@ impl eframe::App for KickterinoApp {
                     tab.send_message(&token, ctx);
                 }
             });
+            ui.add_space(6.0);
         });
 
         // apply font
@@ -672,28 +766,34 @@ impl eframe::App for KickterinoApp {
 
         // side panel (Chatterino-style channel info)
         if self.show_side_panel {
-            egui::Panel::right("side").resizable(true).default_size(220.0).show(ui, |ui| {
-                ui.heading("Channel");
+            egui::Panel::right("side").resizable(true).default_size(240.0).show(ui, |ui| {
+                ui.add_space(8.0);
+                ui.label(egui::RichText::new("Channel").strong().size(15.0));
+                ui.add_space(4.0);
                 if let Some(tab) = self.tabs.get(self.active) {
-                    ui.label(format!("Name: {}", if tab.channel.is_empty() { "—" } else { &tab.channel }));
-                    ui.label(format!("Status: {}", tab.status));
+                    ui.label(egui::RichText::new(if tab.channel.is_empty() { "—".to_string() } else { tab.channel.clone() }).size(13.0).color(egui::Color32::from_rgb(83, 252, 24)));
+                    ui.label(egui::RichText::new(&tab.status).small().color(egui::Color32::from_gray(160)));
                     if let Some(si) = &tab.stream_info {
-                        ui.separator();
-                        ui.label(egui::RichText::new("Stream info").strong());
-                        if !si.title.is_empty() { ui.label(format!("Title: {}", si.title)); }
-                        if !si.category.is_empty() { ui.label(format!("Category: {}", si.category)); }
-                        ui.label(format!("Viewers: {}", si.viewers));
-                        ui.label(format!("Followers: {}", si.followers));
-                        if !si.started_at.is_empty() { ui.label(format!("Started: {}", si.started_at)); }
+                        ui.add_space(8.0);
+                        ui.label(egui::RichText::new("Stream info").strong().small().color(egui::Color32::from_gray(180)));
+                        if !si.title.is_empty() { ui.label(egui::RichText::new(&si.title).small()); }
+                        if !si.category.is_empty() { ui.label(egui::RichText::new(&si.category).small().color(egui::Color32::from_gray(150))); }
+                        ui.horizontal(|ui| {
+                            ui.label(egui::RichText::new(format!("👁 {}", si.viewers)).small());
+                            ui.label(egui::RichText::new(format!("❤ {}", si.followers)).small());
+                        });
+                        if !si.started_at.is_empty() { ui.label(egui::RichText::new(format!("Started: {}", si.started_at)).small().color(egui::Color32::from_gray(150))); }
                     }
                     if let Some(pinned) = &tab.pinned {
-                        ui.separator();
-                        ui.label(egui::RichText::new("Pinned").strong());
-                        ui.label(pinned);
+                        ui.add_space(8.0);
+                        ui.label(egui::RichText::new("Pinned").strong().small().color(egui::Color32::from_rgb(255, 200, 80)));
+                        ui.label(egui::RichText::new(pinned).small());
                     }
+                    ui.add_space(8.0);
                     ui.separator();
-                    ui.label(format!("Messages: {}", tab.messages.len()));
-                    ui.label(format!("Ignored users: {}", tab.ignored.len()));
+                    ui.add_space(4.0);
+                    ui.label(egui::RichText::new(format!("Messages: {}", tab.messages.len())).small().color(egui::Color32::from_gray(150)));
+                    ui.label(egui::RichText::new(format!("Ignored users: {}", tab.ignored.len())).small().color(egui::Color32::from_gray(150)));
                 }
             });
         }
@@ -764,12 +864,7 @@ impl eframe::App for KickterinoApp {
                                     if let Some(url) = &b.image_url {
                                         render_badge_image(ui, self, url, &b.text);
                                     } else {
-                                        let color = badge_color(&b.kind);
-                                        ui.label(
-                                            egui::RichText::new(format!("[{}]", b.text))
-                                                .small()
-                                                .color(color),
-                                        );
+                                        render_badge_icon(ui, &b.kind);
                                     }
                                 }
                             }
@@ -1000,8 +1095,7 @@ fn render_badge_image(ui: &mut egui::Ui, app: &mut KickterinoApp, url: &str, fal
             return;
         }
     }
-    let color = badge_color(fallback);
-    ui.label(egui::RichText::new(format!("[{}]", fallback)).small().color(color));
+    render_badge_icon(ui, fallback);
 }
 
 fn to_12h(ts: &str) -> String {
@@ -1049,6 +1143,69 @@ fn badge_color(kind: &str) -> egui::Color32 {
         "verified" | "partner" | "goldenk" => egui::Color32::from_rgb(0, 180, 255),
         "level" => egui::Color32::from_rgb(255, 200, 80),
         _ => egui::Color32::from_gray(150),
+    }
+}
+
+fn render_badge_icon(ui: &mut egui::Ui, kind: &str) {
+    let size = egui::vec2(14.0, 14.0);
+    let (rect, _) = ui.allocate_exact_size(size, egui::Sense::hover());
+    let center = rect.center();
+    let color = badge_color(kind);
+    let painter = ui.painter();
+    let k = kind.to_lowercase();
+    match k.as_str() {
+        "moderator" | "mod" => {
+            painter.circle_filled(center, 6.0, color);
+            // checkmark
+            let a = center + egui::vec2(-3.0, 0.0);
+            let b = center + egui::vec2(-0.5, 3.0);
+            let c = center + egui::vec2(3.5, -3.0);
+            painter.line_segment([a, b], egui::Stroke::new(1.5, egui::Color32::WHITE));
+            painter.line_segment([b, c], egui::Stroke::new(1.5, egui::Color32::WHITE));
+        }
+        "vip" => {
+            let pts = vec![
+                center + egui::vec2(0.0, -6.0),
+                center + egui::vec2(6.0, 0.0),
+                center + egui::vec2(0.0, 6.0),
+                center + egui::vec2(-6.0, 0.0),
+            ];
+            painter.add(egui::Shape::convex_polygon(pts, color, egui::Stroke::NONE));
+        }
+        "broadcaster" | "owner" | "streamer" => {
+            painter.circle_filled(center, 6.0, color);
+        }
+        "verified" | "partner" | "goldenk" => {
+            painter.circle_filled(center, 6.0, color);
+            let a = center + egui::vec2(-3.0, 0.0);
+            let b = center + egui::vec2(-0.5, 3.0);
+            let c = center + egui::vec2(3.5, -3.0);
+            painter.line_segment([a, b], egui::Stroke::new(1.5, egui::Color32::WHITE));
+            painter.line_segment([b, c], egui::Stroke::new(1.5, egui::Color32::WHITE));
+        }
+        "sub_gifter" | "gifter" => {
+            painter.rect_filled(
+                egui::Rect::from_center_size(center, egui::vec2(10.0, 10.0)),
+                2.0,
+                color,
+            );
+        }
+        "founder" | "og" => {
+            // triangle
+            let pts = vec![
+                center + egui::vec2(0.0, -6.0),
+                center + egui::vec2(6.0, 6.0),
+                center + egui::vec2(-6.0, 6.0),
+            ];
+            painter.add(egui::Shape::convex_polygon(pts, color, egui::Stroke::NONE));
+        }
+        "subscriber" | "sub" => {
+            // star-ish: circle
+            painter.circle_filled(center, 6.0, color);
+        }
+        _ => {
+            painter.circle_filled(center, 5.0, color);
+        }
     }
 }
 
@@ -1703,6 +1860,8 @@ impl Drop for KickterinoApp {
 fn main() -> eframe::Result<()> {
     env_logger::init();
     let mut options = eframe::NativeOptions::default();
+    options.viewport.inner_size = Some(egui::vec2(1180.0, 760.0));
+    options.viewport.min_inner_size = Some(egui::vec2(720.0, 480.0));
     // window icon from bundled logo
     if let Ok(img) = image::load_from_memory(include_bytes!("../assets/logo.jpg")) {
         let rgba = img.to_rgba8();
