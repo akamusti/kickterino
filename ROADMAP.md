@@ -14,25 +14,25 @@ Already shipped:
 - Message deletion handling, message cap, clear chat
 - Dark default egui theme
 
-## Phase 1 — Core chat UX (next)
+## Phase 1 — Core chat UX (done)
 
-- [ ] Pause auto-scroll when the user scrolls up; add "jump to bottom" button
-- [ ] Auto-reconnect with backoff when the WebSocket drops
-- [ ] Load recent chat history on connect (Kick chat history endpoint)
-- [ ] Settings panel: font size, timestamp format (12/24h), show/hide badges
-- [ ] Copy message / copy username (right-click context menu)
-- [ ] Highlight own messages and @mentions
-- [ ] Per-user ignore list (hide messages from a user)
-- [ ] Keyboard shortcuts: Enter to send, Ctrl+L clear, Ctrl+F search
+- [x] Pause auto-scroll when the user scrolls up; add "jump to bottom" button
+- [x] Auto-reconnect with backoff when the WebSocket drops
+- [x] Load recent chat history on connect (Kick chat history endpoint)
+- [x] Settings panel: font size, timestamp format (12/24h), show/hide badges
+- [x] Copy message / copy username (right-click context menu)
+- [x] Highlight own messages and @mentions
+- [x] Per-user ignore list (hide messages from a user)
+- [x] Keyboard shortcuts: Enter to send, Ctrl+L clear, Ctrl+F search
 
 ## Phase 2 — Chatterino feel
 
-- [ ] Multiple splits/channels (tabs) with independent connections
-- [ ] Split resizing and layout persistence
-- [ ] Search/filter within the current chat
-- [ ] User card popup on username click (avatar, bio, follow stats)
-- [ ] Message reply threading (Kick replies_to)
-- [ ] Emote image rendering (Kick emotes) instead of text placeholders
+- [x] Multiple splits/channels (tabs) with independent connections
+- [x] Split resizing and layout persistence (tab layout + settings)
+- [x] Search/filter within the current chat
+- [x] User card popup on username click (avatar, bio, follow stats)
+- [x] Message reply threading (Kick replies_to)
+- [x] Emote image rendering (Kick emotes) instead of text placeholders
 - [ ] 7TV / BTTV / FFZ emote support (optional, extra requests)
 
 ## Phase 3 — Kick-specific features

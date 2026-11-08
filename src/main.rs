@@ -1,7 +1,7 @@
 use anyhow::{Context, Result, bail};
 use eframe::egui;
 use futures::{SinkExt, StreamExt};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::collections::HashSet;
 use std::sync::Arc;
@@ -31,6 +31,7 @@ struct ChatMsg {
     color: Option<String>,
     badges: Vec<Badge>,
     is_system: bool,
+    reply_to: Option<String>,
 }
 
 enum WorkerMsg {
@@ -44,9 +45,18 @@ enum WorkerMsg {
     Error(String),
 }
 
-struct KickterinoApp {
+#[derive(Serialize, Deserialize, Default)]
+struct AppState {
+    tabs: Vec<String>,
+    active: usize,
+    font_size: f32,
+    timestamp_24h: bool,
+    show_timestamps: bool,
+    show_badges: bool,
+}
+
+struct ChatTab {
     channel: String,
-    token: String,
     broadcaster_user_id: Option<u64>,
     messages: Vec<ChatMsg>,
     rx: Receiver<WorkerMsg>,
@@ -54,23 +64,18 @@ struct KickterinoApp {
     input: String,
     status: String,
     generation: Arc<AtomicU64>,
-    show_timestamps: bool,
-    auto_scroll: bool,
-    show_badges: bool,
-    font_size: f32,
-    timestamp_24h: bool,
     search_query: String,
     search_open: bool,
     ignored: HashSet<String>,
     seen: HashSet<String>,
+    auto_scroll: bool,
 }
 
-impl KickterinoApp {
-    fn new(_cc: &eframe::CreationContext<'_>) -> Self {
+impl ChatTab {
+    fn new(channel: &str) -> Self {
         let (tx, rx) = mpsc::channel();
         Self {
-            channel: "xqc".to_string(),
-            token: String::new(),
+            channel: channel.to_string(),
             broadcaster_user_id: None,
             messages: Vec::new(),
             rx,
@@ -78,15 +83,11 @@ impl KickterinoApp {
             input: String::new(),
             status: "Disconnected".to_string(),
             generation: Arc::new(AtomicU64::new(0)),
-            show_timestamps: true,
-            auto_scroll: true,
-            show_badges: true,
-            font_size: 14.0,
-            timestamp_24h: true,
             search_query: String::new(),
             search_open: false,
             ignored: HashSet::new(),
             seen: HashSet::new(),
+            auto_scroll: true,
         }
     }
 
@@ -130,12 +131,12 @@ impl KickterinoApp {
         });
     }
 
-    fn send_message(&mut self, ctx: egui::Context) {
+    fn send_message(&mut self, token: &str, ctx: egui::Context) {
         let text = self.input.trim().to_string();
         if text.is_empty() {
             return;
         }
-        let token = self.token.trim().to_string();
+        let token = token.trim().to_string();
         if token.is_empty() {
             self.status = "No access token set".to_string();
             return;
@@ -174,127 +175,290 @@ impl KickterinoApp {
     }
 }
 
+enum EmoteState {
+    Loading,
+    Ready(Vec<u8>),
+    Failed,
+}
+
+struct UserCardData {
+    username: String,
+    bio: String,
+    avatar_url: String,
+    followers: String,
+}
+
+struct UserCard {
+    username: String,
+    loading: bool,
+    data: Option<UserCardData>,
+    open: bool,
+}
+
+struct KickterinoApp {
+    tabs: Vec<ChatTab>,
+    active: usize,
+    token: String,
+    show_timestamps: bool,
+    show_badges: bool,
+    font_size: f32,
+    timestamp_24h: bool,
+    emote_cache: Arc<std::sync::Mutex<std::collections::HashMap<String, EmoteState>>>,
+    emote_textures: std::collections::HashMap<String, egui::TextureHandle>,
+    user_card: Option<UserCard>,
+    state_path: String,
+}
+
+impl KickterinoApp {
+    fn new(_cc: &eframe::CreationContext<'_>) -> Self {
+        let state_path = format!(
+            "{}/.config/kickterino/state.json",
+            std::env::var("HOME").unwrap_or_else(|_| ".".to_string())
+        );
+        // ensure dir
+        if let Some(parent) = std::path::Path::new(&state_path).parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+        let state: AppState = std::fs::read_to_string(&state_path)
+            .ok()
+            .and_then(|s| serde_json::from_str(&s).ok())
+            .unwrap_or_default();
+
+        let mut tabs = Vec::new();
+        if state.tabs.is_empty() {
+            tabs.push(ChatTab::new("xqc"));
+        } else {
+            for c in &state.tabs {
+                tabs.push(ChatTab::new(c));
+            }
+        }
+        let active = state.active.min(tabs.len().saturating_sub(1));
+
+        Self {
+            tabs,
+            active,
+            token: String::new(),
+            show_timestamps: if state.show_timestamps { true } else { true },
+            show_badges: if state.show_badges { true } else { true },
+            font_size: if state.font_size > 0.0 { state.font_size } else { 14.0 },
+            timestamp_24h: state.timestamp_24h || state.timestamp_24h == false && true,
+            emote_cache: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
+            emote_textures: std::collections::HashMap::new(),
+            user_card: None,
+            state_path,
+        }
+    }
+
+    fn save_state(&self) {
+        let state = AppState {
+            tabs: self.tabs.iter().map(|t| t.channel.clone()).collect(),
+            active: self.active,
+            font_size: self.font_size,
+            timestamp_24h: self.timestamp_24h,
+            show_timestamps: self.show_timestamps,
+            show_badges: self.show_badges,
+        };
+        if let Ok(json) = serde_json::to_string_pretty(&state) {
+            let _ = std::fs::write(&self.state_path, json);
+        }
+    }
+
+    fn fetch_user_card(&mut self, username: String) {
+        let url = format!("https://kick.com/api/v2/channels/{}", username.to_lowercase());
+        let mut cmd = std::process::Command::new("curl");
+        cmd.args(["-sS", "-f", "-m", "20", "-H", "Accept: application/json", "-H", "User-Agent: Mozilla/5.0", &url]);
+        let output = cmd.output();
+        let mut data = None;
+        if let Ok(o) = output {
+            if o.status.success() {
+                if let Ok(v) = serde_json::from_slice::<Value>(&o.stdout) {
+                    data = Some(UserCardData {
+                        username: v["user"]["username"].as_str().unwrap_or(&username).to_string(),
+                        bio: v["user"]["bio"].as_str().unwrap_or("").to_string(),
+                        avatar_url: v["user"]["profile_pic"].as_str().unwrap_or("").to_string(),
+                        followers: v["followers_count"].as_str().unwrap_or("0").to_string(),
+                    });
+                }
+            }
+        }
+        self.user_card = Some(UserCard {
+            username,
+            loading: false,
+            data,
+            open: true,
+        });
+    }
+}
+
 impl eframe::App for KickterinoApp {
     fn logic(&mut self, _ctx: &egui::Context, _frame: &mut eframe::Frame) {
-        while let Ok(m) = self.rx.try_recv() {
-            match m {
-                WorkerMsg::Status(s) => self.status = s,
-                WorkerMsg::Connected { broadcaster_user_id } => {
-                    self.broadcaster_user_id = Some(broadcaster_user_id);
-                }
-                WorkerMsg::Message(msg) => {
-                    if let Some(id) = &msg.id {
-                        if !self.seen.insert(id.clone()) {
-                            // duplicate (history + live)
+        for tab in &mut self.tabs {
+            while let Ok(m) = tab.rx.try_recv() {
+                match m {
+                    WorkerMsg::Status(s) => tab.status = s,
+                    WorkerMsg::Connected { broadcaster_user_id } => {
+                        tab.broadcaster_user_id = Some(broadcaster_user_id);
+                    }
+                    WorkerMsg::Message(msg) => {
+                        if let Some(id) = &msg.id {
+                            if !tab.seen.insert(id.clone()) {
+                                continue;
+                            }
+                        }
+                        if !msg.is_system && tab.ignored.contains(&msg.user.to_lowercase()) {
                             continue;
                         }
+                        tab.messages.push(msg);
+                        if tab.messages.len() > MAX_MESSAGES {
+                            let drain = tab.messages.len() - MAX_MESSAGES;
+                            tab.messages.drain(0..drain);
+                        }
                     }
-                    if !msg.is_system && self.ignored.contains(&msg.user.to_lowercase()) {
-                        continue;
+                    WorkerMsg::Delete(id) => {
+                        tab.messages.retain(|m| m.id.as_deref() != Some(id.as_str()));
                     }
-                    self.messages.push(msg);
-                    if self.messages.len() > MAX_MESSAGES {
-                        let drain = self.messages.len() - MAX_MESSAGES;
-                        self.messages.drain(0..drain);
+                    WorkerMsg::System(text) => {
+                        tab.messages.push(ChatMsg {
+                            id: None,
+                            user: String::new(),
+                            text,
+                            created_at: None,
+                            color: None,
+                            badges: Vec::new(),
+                            is_system: true,
+                            reply_to: None,
+                        });
+                        if tab.messages.len() > MAX_MESSAGES {
+                            let drain = tab.messages.len() - MAX_MESSAGES;
+                            tab.messages.drain(0..drain);
+                        }
                     }
+                    WorkerMsg::Error(e) => tab.status = e,
                 }
-                WorkerMsg::Delete(id) => {
-                    self.messages.retain(|m| m.id.as_deref() != Some(id.as_str()));
-                }
-                WorkerMsg::System(text) => {
-                    self.messages.push(ChatMsg {
-                        id: None,
-                        user: String::new(),
-                        text,
-                        created_at: None,
-                        color: None,
-                        badges: Vec::new(),
-                        is_system: true,
-                    });
-                    if self.messages.len() > MAX_MESSAGES {
-                        let drain = self.messages.len() - MAX_MESSAGES;
-                        self.messages.drain(0..drain);
-                    }
-                }
-                WorkerMsg::Error(e) => self.status = e,
             }
         }
     }
 
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
-        // keyboard shortcuts
-        if ui.input(|i| i.modifiers.ctrl && i.key_pressed(egui::Key::L)) {
-            self.messages.clear();
-            self.seen.clear();
+        // keyboard shortcuts for active tab
+        let i = self.active;
+        if ui.input(|inp| inp.modifiers.ctrl && inp.key_pressed(egui::Key::L)) {
+            if let Some(t) = self.tabs.get_mut(i) {
+                t.messages.clear();
+                t.seen.clear();
+            }
         }
-        if ui.input(|i| i.modifiers.ctrl && i.key_pressed(egui::Key::F)) {
-            self.search_open = true;
+        if ui.input(|inp| inp.modifiers.ctrl && inp.key_pressed(egui::Key::F)) {
+            if let Some(t) = self.tabs.get_mut(i) {
+                t.search_open = true;
+            }
         }
 
+        // top: tabs + settings
         egui::Panel::top("top").show(ui, |ui| {
-            ui.horizontal(|ui| {
-                ui.label("Channel:");
-                ui.text_edit_singleline(&mut self.channel);
-                if ui.button("Connect").clicked() {
-                    self.connect(ui.ctx().clone());
-                }
-                if ui.button("Clear").clicked() {
-                    self.messages.clear();
-                    self.seen.clear();
-                }
-                if ui.button("Search").clicked() {
-                    self.search_open = !self.search_open;
-                }
-                ui.checkbox(&mut self.show_timestamps, "TS");
-                ui.checkbox(&mut self.show_badges, "Badges");
-                ui.checkbox(&mut self.auto_scroll, "Auto-scroll");
-                if ui.button("Jump bottom").clicked() {
-                    self.auto_scroll = true;
-                }
-                ui.label(&self.status);
-            });
-            ui.horizontal(|ui| {
-                ui.label("Access token:");
-                ui.text_edit_singleline(&mut self.token);
-            });
-            if self.search_open {
-                ui.horizontal(|ui| {
-                    ui.label("Search:");
-                    ui.text_edit_singleline(&mut self.search_query);
-                    if ui.button("x").clicked() {
-                        self.search_query.clear();
-                        self.search_open = false;
+            ui.horizontal_wrapped(|ui| {
+                for idx in 0..self.tabs.len() {
+                    let label = if self.tabs[idx].channel.is_empty() {
+                        "new".to_string()
+                    } else {
+                        self.tabs[idx].channel.clone()
+                    };
+                    let selected = idx == self.active;
+                    if ui.selectable_label(selected, label).clicked() {
+                        self.active = idx;
                     }
-                });
-            }
+                    if self.tabs.len() > 1 && ui.small_button("x").clicked() {
+                        self.tabs.remove(idx);
+                        if self.active >= self.tabs.len() {
+                            self.active = self.tabs.len().saturating_sub(1);
+                        }
+                        return;
+                    }
+                }
+                if ui.button("+").clicked() {
+                    self.tabs.push(ChatTab::new(""));
+                    self.active = self.tabs.len() - 1;
+                }
+            });
             ui.horizontal(|ui| {
                 ui.label("Font:");
                 ui.add(egui::Slider::new(&mut self.font_size, 10.0..=22.0));
+                ui.checkbox(&mut self.show_timestamps, "TS");
+                ui.checkbox(&mut self.show_badges, "Badges");
                 ui.checkbox(&mut self.timestamp_24h, "24h time");
             });
         });
 
+        // active tab channel controls
+        if let Some(tab) = self.tabs.get_mut(self.active) {
+            egui::Panel::top("chan").show(ui, |ui| {
+                ui.horizontal(|ui| {
+                    ui.label("Channel:");
+                    ui.text_edit_singleline(&mut tab.channel);
+                    let ctx = ui.ctx().clone();
+                    if ui.button("Connect").clicked() {
+                        tab.connect(ctx);
+                    }
+                    if ui.button("Clear").clicked() {
+                        tab.messages.clear();
+                        tab.seen.clear();
+                    }
+                    if ui.button("Search").clicked() {
+                        tab.search_open = !tab.search_open;
+                    }
+                    ui.checkbox(&mut tab.auto_scroll, "Auto-scroll");
+                    if ui.button("Jump bottom").clicked() {
+                        tab.auto_scroll = true;
+                    }
+                    ui.label(&tab.status);
+                });
+                ui.horizontal(|ui| {
+                    ui.label("Access token:");
+                    ui.text_edit_singleline(&mut self.token);
+                });
+                if tab.search_open {
+                    ui.horizontal(|ui| {
+                        ui.label("Search:");
+                        ui.text_edit_singleline(&mut tab.search_query);
+                        if ui.button("x").clicked() {
+                            tab.search_query.clear();
+                            tab.search_open = false;
+                        }
+                    });
+                }
+            });
+        }
+
+        // bottom input
         egui::Panel::bottom("bottom").show(ui, |ui| {
             ui.horizontal(|ui| {
-                let response = ui.text_edit_singleline(&mut self.input);
+                let tab = &mut self.tabs[self.active];
+                let response = ui.text_edit_singleline(&mut tab.input);
                 let send = ui.button("Send").clicked()
                     || (response.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)));
                 if send {
-                    self.send_message(ui.ctx().clone());
+                    let ctx = ui.ctx().clone();
+                    let token = self.token.clone();
+                    tab.send_message(&token, ctx);
                 }
             });
         });
 
-        // apply font size
+        // apply font
         ui.style_mut().text_styles.get_mut(&egui::TextStyle::Body).unwrap().size = self.font_size;
 
         egui::CentralPanel::default().show(ui, |ui| {
+            let i = self.active;
+            let auto_scroll = self.tabs[i].auto_scroll;
+            let search_query = self.tabs[i].search_query.clone();
+            let msgs: Vec<ChatMsg> = self.tabs[i].messages.clone();
+            let mut pending_ignore: Vec<String> = Vec::new();
+            let mut pending_user_card: Option<String> = None;
             egui::ScrollArea::vertical()
-                .stick_to_bottom(self.auto_scroll)
+                .stick_to_bottom(auto_scroll)
                 .show(ui, |ui| {
-                    let query = self.search_query.to_lowercase();
-                    for m in &self.messages {
-                        // search filter
+                    let query = search_query.to_lowercase();
+                    for m in &msgs {
                         if !query.is_empty() {
                             let hay = format!("{} {}", m.user, m.text).to_lowercase();
                             if !hay.contains(&query) {
@@ -308,6 +472,14 @@ impl eframe::App for KickterinoApp {
                                     .color(egui::Color32::from_gray(160)),
                             );
                             continue;
+                        }
+                        if let Some(rt) = &m.reply_to {
+                            ui.label(
+                                egui::RichText::new(format!("↪ {}", rt))
+                                    .small()
+                                    .italics()
+                                    .color(egui::Color32::from_gray(140)),
+                            );
                         }
                         let is_mention = m.text.contains('@');
                         let row = ui.horizontal_wrapped(|ui| {
@@ -340,11 +512,15 @@ impl eframe::App for KickterinoApp {
                                 .as_deref()
                                 .and_then(parse_color)
                                 .unwrap_or(egui::Color32::from_rgb(80, 160, 255));
-                            ui.label(
-                                egui::RichText::new(&m.user)
-                                    .strong()
-                                    .color(name_color),
+                            let name_resp = ui.add(
+                                egui::Label::new(
+                                    egui::RichText::new(&m.user).strong().color(name_color),
+                                )
+                                .sense(egui::Sense::click()),
                             );
+                            if name_resp.clicked() {
+                                pending_user_card = Some(m.user.clone());
+                            }
                             ui.label(
                                 egui::RichText::new(":").color(egui::Color32::from_gray(120)),
                             );
@@ -355,11 +531,7 @@ impl eframe::App for KickterinoApp {
                             };
                             for (is_emote, seg) in split_content(&m.text) {
                                 if is_emote {
-                                    ui.label(
-                                        egui::RichText::new(seg)
-                                            .italics()
-                                            .color(egui::Color32::from_rgb(255, 220, 120)),
-                                    );
+                                    render_emote(ui, self, &seg);
                                 } else if is_mention {
                                     ui.label(egui::RichText::new(seg).color(text_color));
                                 } else {
@@ -376,17 +548,105 @@ impl eframe::App for KickterinoApp {
                                 ui.ctx().copy_text(msg.user.clone());
                             }
                             if ui.button("Ignore user").clicked() {
-                                self.ignored.insert(msg.user.to_lowercase());
+                                pending_ignore.push(msg.user.to_lowercase());
                             }
                         });
                     }
                 });
+            // apply pending
+            let i = self.active;
+            for u in pending_ignore {
+                self.tabs[i].ignored.insert(u);
+            }
+            if let Some(u) = pending_user_card {
+                self.fetch_user_card(u);
+            }
         });
+
+        // user card window
+        if let Some(uc) = &mut self.user_card {
+            if uc.open {
+                let mut open = uc.open;
+                egui::Window::new("User card")
+                    .open(&mut open)
+                    .show(ui.ctx(), |ui| {
+                        if let Some(d) = &uc.data {
+                            ui.heading(&d.username);
+                            ui.label(format!("Followers: {}", d.followers));
+                            if !d.bio.is_empty() {
+                                ui.label(&d.bio);
+                            }
+                        } else {
+                            ui.label("No data");
+                        }
+                    });
+                uc.open = open;
+                if !uc.open {
+                    self.user_card = None;
+                }
+            }
+        }
+
+        self.save_state();
     }
 }
 
+fn render_emote(ui: &mut egui::Ui, app: &mut KickterinoApp, id: &str) {
+    // ensure fetch started
+    {
+        let mut cache = app.emote_cache.lock().unwrap();
+        if !cache.contains_key(id) {
+            cache.insert(id.to_string(), EmoteState::Loading);
+            let id2 = id.to_string();
+            let cache2 = Arc::clone(&app.emote_cache);
+            let ctx2 = ui.ctx().clone();
+            thread::spawn(move || {
+                let url = format!("https://files.kick.com/emotes/{}/fullsize", id2);
+                let mut cmd = std::process::Command::new("curl");
+                cmd.args(["-sS", "-f", "-m", "20", "-H", "User-Agent: Mozilla/5.0", &url]);
+                let res = cmd.output();
+                let mut cache = cache2.lock().unwrap();
+                match res {
+                    Ok(o) if o.status.success() && !o.stdout.is_empty() => {
+                        cache.insert(id2, EmoteState::Ready(o.stdout));
+                    }
+                    _ => {
+                        cache.insert(id2, EmoteState::Failed);
+                    }
+                }
+                ctx2.request_repaint();
+            });
+        }
+    }
+
+    if let Some(tex) = app.emote_textures.get(id) {
+        ui.add(egui::Image::new(tex).max_size(egui::vec2(32.0, 32.0)));
+        return;
+    }
+
+    let bytes_opt = {
+        let cache = app.emote_cache.lock().unwrap();
+        match cache.get(id) {
+            Some(EmoteState::Ready(b)) => Some(b.clone()),
+            _ => None,
+        }
+    };
+    if let Some(bytes) = bytes_opt {
+        // decode
+        if let Ok(img) = image::load_from_memory(&bytes) {
+            let rgba = img.to_rgba8();
+            let size = [rgba.width() as usize, rgba.height() as usize];
+            let color_image = egui::ColorImage::from_rgba_unmultiplied(size, rgba.as_flat_samples().as_slice());
+            let tex = ui.ctx().load_texture(id, color_image, egui::TextureOptions::default());
+            app.emote_textures.insert(id.to_string(), tex.clone());
+            ui.add(egui::Image::new(&tex).max_size(egui::vec2(32.0, 32.0)));
+            return;
+        }
+    }
+    ui.label(format!("[{}]", id));
+}
+
 fn to_12h(ts: &str) -> String {
-    // "HH:MM:SS" -> "h:MM:SS AM/PM"
     if ts.len() < 8 {
         return ts.to_string();
     }
@@ -474,7 +734,11 @@ fn split_content(content: &str) -> Vec<(bool, String)> {
         if let Some(end) = after.find(']') {
             let token = &after[..=end];
             let name = token.rsplit(':').next().unwrap_or("").trim_end_matches(']');
-            out.push((true, name.to_string()));
+            // extract id: token format [emote:ID:NAME]
+            let inner = token.trim_start_matches("[emote:").trim_end_matches(']');
+            let id = inner.split(':').next().unwrap_or(name).to_string();
+            // store id as seg for emote (we'll render by id); but name nicer? Use id for fetch.
+            out.push((true, id));
             rest = &after[end + 1..];
         } else {
             out.push((false, rest.to_string()));
@@ -496,6 +760,29 @@ fn short_time(created_at: &str) -> Option<String> {
     }
 }
 
+fn parse_reply_to(m: &Value) -> Option<String> {
+    // history: metadata JSON with original_message.sender.username
+    if let Some(meta) = m.get("metadata") {
+        let raw = meta.as_str().unwrap_or("");
+        if !raw.is_empty() {
+            if let Ok(v) = serde_json::from_str::<Value>(raw) {
+                if let Some(om) = v.get("original_message") {
+                    if let Some(u) = om["sender"]["username"].as_str() {
+                        return Some(u.to_string());
+                    }
+                }
+            }
+        }
+    }
+    // realtime payload may include reply_to_message or replies_to
+    if let Some(r) = m.get("reply_to") {
+        if let Some(u) = r["sender"]["username"].as_str().or_else(|| r["username"].as_str()) {
+            return Some(u.to_string());
+        }
+    }
+    None
+}
+
 fn parse_history_msg(m: &Value) -> Option<ChatMsg> {
     let user = m["sender"]["username"].as_str().unwrap_or_default().to_string();
     let text = m["content"]
@@ -508,7 +795,6 @@ fn parse_history_msg(m: &Value) -> Option<ChatMsg> {
     }
     let id = m["id"].as_str().map(|s| s.to_string());
     let created_at = m["created_at"].as_str().map(short_time).flatten();
-    // history uses sender.color; realtime uses identity
     let color = m["sender"]["color"]
         .as_str()
         .or_else(|| m["sender"]["identity"]["color"].as_str())
@@ -520,6 +806,7 @@ fn parse_history_msg(m: &Value) -> Option<ChatMsg> {
             .or_else(|| m["sender"]["identity"].get("badges"))
             .unwrap_or(&Value::Null),
     );
+    let reply_to = parse_reply_to(m);
     Some(ChatMsg {
         id,
         user,
@@ -528,6 +815,7 @@ fn parse_history_msg(m: &Value) -> Option<ChatMsg> {
         color,
         badges,
         is_system: false,
+        reply_to,
     })
 }
 
@@ -564,7 +852,6 @@ async fn fetch_history(chatroom_id: u64) -> Vec<ChatMsg> {
         .iter()
         .filter_map(parse_history_msg)
         .collect();
-    // newest first -> chronological
     msgs.reverse();
     msgs
 }
@@ -711,7 +998,6 @@ async fn run_chat(
         return Ok(());
     }
 
-    // load recent history first
     let history = fetch_history(info.chatroom_id).await;
     for m in history {
         if is_current() {
@@ -882,6 +1168,7 @@ fn handle_push(push: &Value, tx: &Sender<WorkerMsg>, ctx: &egui::Context) {
                     .or_else(|| identity.get("badges_v2"))
                     .unwrap_or(&Value::Null),
             );
+            let reply_to = parse_reply_to(&payload);
             notify(
                 tx,
                 ctx,
@@ -893,6 +1180,7 @@ fn handle_push(push: &Value, tx: &Sender<WorkerMsg>, ctx: &egui::Context) {
                     color,
                     badges,
                     is_system: false,
+                    reply_to,
                 }),
             );
         }
@@ -971,6 +1259,12 @@ fn handle_push(push: &Value, tx: &Sender<WorkerMsg>, ctx: &egui::Context) {
     }
 }
 
+impl Drop for KickterinoApp {
+    fn drop(&mut self) {
+        self.save_state();
+    }
+}
+
 fn main() -> eframe::Result<()> {
     env_logger::init();
     let options = eframe::NativeOptions::default();
@@ -980,3 +1274,4 @@ fn main() -> eframe::Result<()> {
         Box::new(|cc| Ok(Box::new(KickterinoApp::new(cc)))),
     )
 }
+
