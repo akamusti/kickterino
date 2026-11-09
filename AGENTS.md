@@ -42,12 +42,19 @@ Requires network access for `cargo` to fetch crates on first build.
 - Do not commit secrets, tokens, or credentials.
 - Keep dependencies minimal to reduce RAM/GPU usage.
 - Prefer `cargo fmt` and `cargo clippy` before committing.
+- App logo/branding assets live in `assets/` (`logo.jpg` source, `icon.png` 256x256 derived). Use these for window icons and release icons; do not introduce alternate logos.
 
 ## CI / Release (agents must NOT touch)
 
 - `.github/workflows/release.yml` builds AppImage (Linux) and Windows `.exe` on tag push.
 - Agents MUST NOT trigger, modify, or follow the CI/AppImage creation sequence.
 - Do not run `gh workflow run`, do not push tags to trigger releases, and do not edit workflow files unless explicitly asked by the maintainer.
+
+## Releases
+
+- Pre-releases use `vX.Y.Z-rc.N` tags and carry a "What's new" summary in the GitHub release notes.
+- When preparing a release, bump `Cargo.toml` version, update `AGENTS.md`/`README.md` as needed, commit, tag, and push; CI produces the binaries.
+- Release notes should list user-visible changes since the previous tag.
 
 ## Safety
 

@@ -31,8 +31,8 @@ jobs:
           DESKTOP
           cp AppDir/kickterino.desktop AppDir/usr/share/applications/
           ln -s usr/bin/kickterino AppDir/AppRun
-          cp assets/icon.svg AppDir/kickterino.svg
-          cp assets/icon.svg AppDir/usr/share/icons/hicolor/256x256/apps/kickterino.svg
+          cp assets/icon.png AppDir/kickterino.png
+          cp assets/icon.png AppDir/usr/share/icons/hicolor/256x256/apps/kickterino.png
           wget -q https://github.com/AppImage/AppImageKit/releases/download/continuous/appimagetool-x86_64.AppImage
           chmod +x appimagetool-x86_64.AppImage
           ARCH=x86_64 ./appimagetool-x86_64.AppImage --appimage-extract-and-run --updateinformation "gh-releases-zsync|akamusti|kickterino|latest|kickterino-*x86_64.AppImage" AppDir kickterino-x86_64.AppImage
